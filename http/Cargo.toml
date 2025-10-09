@@ -1,0 +1,10 @@
+[package]
+name = "http"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+defmt = {version = "1.0.1"}
+sha1 = {version = "0.10.6", default-features=false}
+base64ct = "1.8.0"
+embedded-io-async = "0.6.1"
