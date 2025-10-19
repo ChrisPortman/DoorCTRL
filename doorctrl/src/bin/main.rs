@@ -141,26 +141,15 @@ async fn main(spawner: Spawner) {
     info!("Network initialized");
 
     // Some task comms
+    // cmd_channel is for processing incomming command from external sources (i.e. lock/unlock)
     let cmd_channel = mk_static!(
         Channel::<CriticalSectionRawMutex, LockState, 2>,
         Channel::<CriticalSectionRawMutex, LockState, 2>::new()
     );
+    // state_pubsub is for eminating changes in state as they are detected
     let state_pubsub = mk_static!(
         PubSubChannel::<CriticalSectionRawMutex, AnyState, 2, 6, 0>,
         PubSubChannel::<CriticalSectionRawMutex, AnyState, 2, 6, 0>::new()
-    );
-
-    // Init the door
-    let lock_pin = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
-    let reed_pin = Input::new(
-        peripherals.GPIO2,
-        InputConfig::default().with_pull(Pull::Up),
-    );
-    let door = Door::new(
-        lock_pin,
-        reed_pin,
-        cmd_channel.receiver(),
-        state_pubsub.immediate_publisher(),
     );
 
     spawner
@@ -188,6 +177,19 @@ async fn main(spawner: Spawner) {
             error!("error spawning web task: {}", e);
         }
     }
+
+    // Init the door
+    let lock_pin = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+    let reed_pin = Input::new(
+        peripherals.GPIO2,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    let door = Door::new(
+        lock_pin,
+        reed_pin,
+        cmd_channel.receiver(),
+        state_pubsub.immediate_publisher(),
+    );
 
     spawner.spawn(door_service(door)).ok();
 

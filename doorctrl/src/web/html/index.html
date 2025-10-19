@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>DoorCTRL</title>
+    <style>
+        body {
+            background-color: black;
+            color: lightgrey;
+        }
+
+        .container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 95vh;
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            width: 70vh;
+            min-height: 70vh;
+            border-style: solid;
+            border-color: lightgrey;
+            border-width: 0px;
+            border-radius: 20px;
+            box-shadow: 0 0 15px 5px darkgrey inset;
+        }
+
+        .header,
+        .footer {
+            height: 60px;
+
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .footer {
+            display: flex;
+            align-items: end;
+            justify-content: right;
+        }
+
+        .content {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex: 1;
+            margin-left: 100px;
+            margin-right: 100px;
+        }
+
+        .door-content {
+            flex: 1;
+        }
+
+        .lock-content {
+            flex: 0;
+        }
+
+        .lock-container {
+            padding: 15px;
+            min-height: 40px;
+            min-width: 40px;
+            border-radius: 100%;
+            box-shadow: 0 0 20px 20px;
+            cursor: pointer;
+        }
+
+        .locked {
+            background-color: green;
+            box-shadow: 0 0 20px 20px green;
+        }
+
+        .unlocked {
+            background-color: red;
+            box-shadow: 0 0 20px 20px red;
+        }
+
+        .hide {
+            display: none;
+        }
+
+        svg {
+            fill: lightgray;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div id="app">
+            <div class="header">
+                <h1>Door Control</h1>
+            </div>
+
+            <div class="content">
+                <div class="door-content">
+                    <div class="door-image">
+                        <svg id="door-open" fill="#000000" version="1.1" id="Capa_1" xmlns="http://www.w3.org/2000/svg"
+                            xmlns:xlink="http://www.w3.org/1999/xlink" width="100%" height="100%"
+                            viewBox="0 0 492.5 492.5" xml:space="preserve" transform="matrix(-1, 0, 0, 1, 0, 0)">
+                            <g id="SVGRepo_bgCarrier" stroke-width="0"></g>
+                            <g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g>
+                            <g id="SVGRepo_iconCarrier">
+                                <g>
+                                    <path
+                                        d="M285.048,21.72L164.234,0v21.72H79.292v433.358h31.403V53.123h53.539V492.5l208.15-37.422v-61.235h9.421v61.235h31.403 V21.72H285.048z M202.526,263.129c-6.997,0-12.67-7.381-12.67-16.486c0-9.104,5.673-16.485,12.67-16.485s12.67,7.381,12.67,16.485 C215.196,255.748,209.523,263.129,202.526,263.129z M381.805,344.646h-9.421V142.621h9.421V344.646z M381.805,93.423h-9.421v-40.3 h9.421V93.423z">
+                                    </path>
+                                </g>
+                            </g>
+                        </svg>
+                        <svg id="door-closed" class="hide" fill="#000000" version="1.1" id="Capa_1"
+                            xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100%"
+                            height="100%" viewBox="0 0 478.666 478.666" xml:space="preserve"
+                            transform="matrix(-1, 0, 0, 1, 0, 0)">
+                            <g id="SVGRepo_bgCarrier" stroke-width="0"></g>
+                            <g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g>
+                            <g id="SVGRepo_iconCarrier">
+                                <g>
+                                    <path
+                                        d="M71.553,0v478.085l335.561,0.581V0H71.553z M103.109,446.583V31.558h272.445v56.813h-10.781V42.086H113.893v394.468 h250.881V390.27h10.781v56.785L103.109,446.583z M364.773,137.459h10.781V341.18h-10.781V137.459z M165.787,239.32 c0,9.148-7.418,16.566-16.568,16.566c-9.15,0-16.568-7.418-16.568-16.566c0-9.15,7.418-16.568,16.568-16.568 C158.369,222.752,165.787,230.17,165.787,239.32z">
+                                    </path>
+                                </g>
+                            </g>
+                        </svg>
+                    </div>
+                </div>
+                <div class="lock-content">
+                    <div id="lock" class="lock-container locked">
+                        <svg id="lock-unlocked" class="hide" viewBox="0 0 16 16" fill="none"
+                            xmlns="http://www.w3.org/2000/svg">
+                            <g id="SVGRepo_bgCarrier" stroke-width="0"></g>
+                            <g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g>
+                            <g id="SVGRepo_iconCarrier">
+                                <path fill-rule="evenodd" clip-rule="evenodd"
+                                    d="M11.5 2C10.6716 2 10 2.67157 10 3.5V6H13V16H1V6H8V3.5C8 1.567 9.567 0 11.5 0C13.433 0 15 1.567 15 3.5V4H13V3.5C13 2.67157 12.3284 2 11.5 2ZM9 10H5V12H9V10Z">
+                                </path>
+                            </g>
+                        </svg>
+                        <svg id="lock-locked" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <g id="SVGRepo_bgCarrier" stroke-width="0"></g>
+                            <g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g>
+                            <g id="SVGRepo_iconCarrier">
+                                <path fill-rule="evenodd" clip-rule="evenodd"
+                                    d="M4 6V4C4 1.79086 5.79086 0 8 0C10.2091 0 12 1.79086 12 4V6H14V16H2V6H4ZM6 4C6 2.89543 6.89543 2 8 2C9.10457 2 10 2.89543 10 4V6H6V4ZM7 13V9H9V13H7Z">
+                                </path>
+                            </g>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+
+            <div class="footer">
+                version: 0.0.0
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var ws = new WebSocket('/ws');
+        const ws_status_update = 1;
+        const ws_status_update_lock = 1;
+        const ws_status_update_unlock = 2;
+        const ws_status_update_open = 3;
+        const ws_status_update_closed = 4;
+
+        var doorOpen = false;
+        var locked = true;
+
+
+        function openDoor() {
+            const doorOpenImg = document.getElementById("door-open");
+            const doorClosedImg = document.getElementById("door-closed");
+            doorClosedImg.classList.add("hide");
+            doorOpenImg.classList.remove("hide");
+        }
+
+        function closeDoor() {
+            const doorOpenImg = document.getElementById("door-open");
+            const doorClosedImg = document.getElementById("door-closed");
+            doorOpenImg.classList.add("hide");
+            doorClosedImg.classList.remove("hide");
+        }
+
+        function toggleDoor() {
+            if (doorOpen) {
+                closeDoor();
+                doorOpen = false;
+            } else {
+                openDoor();
+                doorOpen = true;
+            }
+        }
+
+        function openLock() {
+            const lockElem = document.getElementById("lock");
+            const lockOpenImg = document.getElementById("lock-unlocked");
+            const lockClosedImg = document.getElementById("lock-locked");
+            lock.classList.replace("locked", "unlocked");
+            lockClosedImg.classList.add("hide");
+            lockOpenImg.classList.remove("hide");
+        }
+
+        function closeLock() {
+            const lockElem = document.getElementById("lock");
+            const lockOpenImg = document.getElementById("lock-unlocked");
+            const lockClosedImg = document.getElementById("lock-locked");
+            lock.classList.replace("unlocked", "locked");
+            lockOpenImg.classList.add("hide");
+            lockClosedImg.classList.remove("hide");
+        }
+
+        function toggleLock() {
+            var lockstate = new Uint8Array(2);
+            lockstate[0] = ws_status_update;
+
+            if (locked) {
+                openLock();
+                locked = false;
+                lockstate[1] = ws_status_update_unlock;
+            } else {
+                closeLock();
+                locked = true;
+                lockstate[1] = ws_status_update_lock;
+            }
+
+            wsSend(lockstate);
+        }
+
+        function processStateUpdate(state) {
+            switch (state) {
+                case ws_status_update_lock:
+                    closeLock();
+                    break;
+                case ws_status_update_unlock:
+                    openLock();
+                    break;
+                case ws_status_update_open:
+                    openDoor();
+                    break;
+                case ws_status_update_closed:
+                    closeDoor();
+                    break;
+            }
+        }
+
+        async function wsSend(data) {
+            const sleepNow = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
+            console.log(ws);
+
+            while (ws.readyState !== WebSocket.OPEN) {
+                if (ws.readyState > 1) {
+                    ws = new WebSocket('/ws');
+                }
+
+                await sleepNow(300);
+            }
+
+            ws.send(data);
+        }
+
+        const lockElem = document.getElementById("lock");
+        lockElem.addEventListener("click", toggleLock);
+
+        ws.addEventListener('open', (e) => {
+            console.log('websocket opened');
+            console.log(e);
+        });
+
+        ws.addEventListener('error', (e) => {
+            console.log('websocket error');
+            console.log(e);
+        });
+
+        ws.addEventListener('close', (e) => {
+            console.log('websocket closed');
+            console.log(e);
+        });
+
+        ws.addEventListener('message', (e) => {
+            console.log('websocket message received');
+            console.log(e);
+            e.data.bytes().then(
+                (data) => {
+                    console.log(data);
+                    if (data.length == 2 && data[0] === ws_status_update) {
+                        processStateUpdate(data[1]);
+                    }
+                }
+            );
+        });
+
+    </script>
+</body>
+
+</html>

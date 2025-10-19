@@ -1,10 +1,10 @@
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum LockState {
     Locked,
     Unlocked,
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum DoorState {
     Open,
     Closed,

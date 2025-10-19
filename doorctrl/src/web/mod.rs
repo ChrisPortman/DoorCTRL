@@ -1,4 +1,3 @@
-use core::mem::size_of;
 use core::str;
 
 use defmt::{error, info, warn};
@@ -7,15 +6,22 @@ use embassy_net::{tcp::TcpSocket, IpListenEndpoint, Stack};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, pubsub::Subscriber,
 };
-use embedded_io_async::{Read, ReadExactError};
+use embassy_time::{Duration, Timer};
+use embedded_io_async::Write;
 
 use crate::state::{AnyState, DoorState, LockState};
 
 use http::{
     self,
-    response::{respond, respond_websocket},
-    HTTPError, HttpRequest,
+    header::HttpHeader,
+    request::{HttpMethod, HttpRequest},
+    response::{HttpResponse, HttpStatusCode},
+    websocket::{sec_websocket_accept_val, WebsocketError, WebsocketFrame},
+    HTTPError,
 };
+
+const MAX_REQUEST_HDRS: usize = 16;
+const MAX_RESPONSE_HDRS: usize = 6;
 
 const ERR_ACCEPT_ABORTED: &'static str = "waiting for connection aborted";
 
@@ -28,14 +34,108 @@ const WS_LOCK_UNLOCK: u8 = 2;
 const WS_DOOR_OPEN: u8 = 3;
 const WS_DOOR_CLOSED: u8 = 4;
 
-pub struct HttpService {}
+const HTML_INDEX: &'static [u8] = include_bytes!("html/index.html");
+const HTML_404: &'static [u8] = include_bytes!("html/404.html");
+const HTML_400: &'static [u8] = include_bytes!("html/400.html");
+const FAVICON: &'static [u8] = include_bytes!("html/favicon.ico");
+
+pub struct HttpService {
+    door_state: Option<DoorState>,
+    lock_state: Option<LockState>,
+}
 
 impl HttpService {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            door_state: None,
+            lock_state: None,
+        }
     }
 
-    pub async fn run<'a>(
+    fn handle_request(
+        &self,
+        req: &HttpRequest<MAX_REQUEST_HDRS>,
+        resp: &mut HttpResponse<MAX_RESPONSE_HDRS>,
+    ) -> Result<Option<&'static [u8]>, HTTPError> {
+        if req.content_len() > 0 {
+            // We dont take requests with payloads, so rather than have
+            // to handle syncronising the tcp stream by reading off the
+            // content we dont want, we'll just disconnect the client
+            // and start fresh.
+            resp.set_status(HttpStatusCode::BadRequest);
+            return Err(HTTPError::UnsupportedRequest(
+                "requests with bodies is not supported",
+            ));
+        }
+
+        match req.method {
+            HttpMethod::GET => {}
+            _ => {
+                error!("only GET request are supported");
+                resp.set_status(HttpStatusCode::NotFound);
+                return Ok(Some(HTML_404));
+            }
+        }
+
+        match req.path {
+            "/" => return Ok(Some(HTML_INDEX)),
+            "/favicon.ico" => Ok(Some(FAVICON)),
+            "/ws" => {
+                if let Some(HttpHeader::SecWebSocketKey(key)) =
+                    req.get_header(HttpHeader::SecWebSocketKey(""))
+                {
+                    if let Ok(accept_key) = sec_websocket_accept_val(key) {
+                        resp.set_status(HttpStatusCode::SwitchingProtocols);
+                        if let Err(e) = resp
+                            .add_extra_header(HttpHeader::SecWebSocketAccept(accept_key))
+                            .and(resp.add_extra_header(HttpHeader::Other("Upgrade", "websocket")))
+                            .and(resp.add_extra_header(HttpHeader::Other("Connection", "Upgrade")))
+                        {
+                            return Err(e);
+                        }
+
+                        return Ok(None);
+                    }
+                }
+                resp.set_status(HttpStatusCode::BadRequest);
+                return Ok(Some(HTML_400));
+            }
+            _ => {
+                resp.set_status(HttpStatusCode::NotFound);
+                return Ok(Some(HTML_404));
+            }
+        }
+    }
+
+    pub async fn receive_request<'a, 'b>(
+        &self,
+        sock: &mut TcpSocket<'a>,
+        buff: &'b mut [u8],
+    ) -> Result<HttpRequest<'b, MAX_REQUEST_HDRS>, HTTPError> {
+        let mut offset = 0usize;
+        let req_len: usize;
+        let req: HttpRequest<'b, MAX_REQUEST_HDRS>;
+
+        loop {
+            let read = match sock.read(&mut buff[offset..]).await {
+                Ok(0) => return Err(HTTPError::NetworkError("client closed connection")),
+                Ok(n) => n,
+                Err(_) => return Err(HTTPError::NetworkError("Error reading from connection")),
+            };
+
+            offset += read;
+
+            if let Some(pos) = HttpRequest::<MAX_REQUEST_HDRS>::contains_request_headers(&*buff) {
+                req_len = pos;
+                break;
+            }
+        }
+
+        req = HttpRequest::parse_request(&buff[..req_len])?;
+        return Ok(req);
+    }
+
+    pub async fn run<'a, 'b>(
         &mut self,
         stack: Stack<'static>,
         cmd_channel: &Sender<'static, CriticalSectionRawMutex, LockState, 2>,
@@ -62,148 +162,145 @@ impl HttpService {
 
             'request: loop {
                 // each iteration handles an HTTP request/response
-                info!("processing request");
-                let mut offset = 0;
-                http_buf.fill(0);
-
-                'read: loop {
-                    // This loop handles the fact that a single read may not read an entire
-                    // request.
-                    info!("reading from socket");
-                    match sock.read(&mut http_buf[offset..]).await {
-                        Ok(0) => {
-                            info!("http: connection closed by remote");
-                            sock.close();
-                            break 'request;
-                        }
-                        Ok(n) => {
-                            offset += n;
-
-                            match HttpRequest::try_from(&http_buf[..offset]) {
-                                Ok(req) => {
-                                    info!(
-                                        "http: request to {} {} with {} bytes payload",
-                                        req.method,
-                                        req.path,
-                                        req.content_len()
-                                    );
-
-                                    if req.content_len() > 0 {
-                                        // We dont take requests with payloads, so rather than have
-                                        // to handle syncronising the tcp stream by reading off the
-                                        // content we dont want, we'll just disconnect the client
-                                        // and start fresh.
-                                        error!(
-                                            "received request with payload which is unsupported"
-                                        );
-                                        _ = respond(400, &mut sock).await;
-                                        sock.close();
-                                        break 'request;
-                                    }
-
-                                    if let Err(e) = match req.method {
-                                        http::HttpMethod::GET => Ok(()),
-                                        _ => respond(400, &mut sock).await,
-                                    } {
-                                        error!("{}", e);
-                                        sock.close();
-                                        break 'request;
-                                    }
-
-                                    if let Err(e) = match req.path {
-                                        "/" => respond(200, &mut sock).await,
-                                        "/ws" => match req.get_header(http::UPGRADE) {
-                                            None => Err("received /ws request without upgrade"),
-                                            Some(u) if u == "websocket" => {
-                                                if let Some(key) =
-                                                    req.get_header(http::SEC_WEBSOCKET_KEY)
-                                                {
-                                                    respond_websocket(key, &mut sock).await?;
-                                                    self.run_ws(
-                                                        &mut sock,
-                                                        &mut http_buf,
-                                                        cmd_channel,
-                                                        state_sub,
-                                                    )
-                                                    .await?;
-                                                    sock.close();
-                                                    break 'request;
-                                                }
-                                                Ok(())
-                                            }
-                                            _ => Err("unknown upgrade"),
-                                        },
-                                        _ => respond(404, &mut sock).await,
-                                    } {
-                                        error!("error processing request: {}", e);
-                                        sock.close();
-                                        break 'request;
-                                    }
-
-                                    break 'read;
-                                }
-                                Err(HTTPError::NotReady) => {
-                                    info!("received partial, reading more");
-                                    continue 'read;
-                                }
-                                Err(HTTPError::ProtocolErr(e)) => {
-                                    error!("http: {}", e);
-                                    sock.close();
-                                    break 'request;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("http: error reading from socket: {}", e);
-                            sock.close();
-                            break 'request;
-                        }
+                let req = match select::select(
+                    self.receive_request(&mut sock, &mut http_buf),
+                    Timer::after(Duration::from_secs(1)),
+                )
+                .await
+                {
+                    select::Either::First(Ok(r)) => r,
+                    select::Either::First(Err(e)) => {
+                        error!("web: error receiving request: {:?}", e);
+                        break 'request;
                     }
+                    select::Either::Second(_) => {
+                        info!("web: closing idle client connection");
+                        break 'request;
+                    }
+                };
+
+                info!(
+                    "http: request to {} {} with {} bytes payload: {:?}",
+                    req.method,
+                    req.path,
+                    req.content_len(),
+                    req,
+                );
+
+                let mut resp = HttpResponse::default();
+                let mut body: Option<&'static [u8]> = None;
+                let mut upgrade: bool = false;
+
+                match self.handle_request(&req, &mut resp) {
+                    Ok(Some(b)) => body = Some(b),
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("web: processing request experianced error: {:?}", e);
+                        break 'request;
+                    }
+                };
+
+                if let HttpStatusCode::SwitchingProtocols = resp.get_status() {
+                    upgrade = true;
+                }
+
+                if let Err(e) = match body {
+                    Some(b) => resp.send_with_body(&mut sock, b).await,
+                    None => resp.send(&mut sock).await,
+                } {
+                    error!("web: error sending response - {:?}", e);
+                }
+
+                if upgrade {
+                    self.run_ws(&mut sock, &mut http_buf, cmd_channel, state_sub)
+                        .await?;
+                    break 'request;
                 }
             }
+
+            sock.close();
         }
+    }
+
+    async fn send_state_via_ws<T: Write>(
+        &mut self,
+        mut writer: &mut T,
+        state: AnyState,
+    ) -> Result<(), &'static str> {
+        if let Err(e) = match state {
+            AnyState::LockState(LockState::Locked) => {
+                self.lock_state = Some(LockState::Locked);
+                WebsocketFrame::send(&mut writer, &mut [WS_STATE_UPDATE, WS_LOCK_LOCK]).await
+            }
+            AnyState::LockState(LockState::Unlocked) => {
+                self.lock_state = Some(LockState::Unlocked);
+                WebsocketFrame::send(&mut writer, &mut [WS_STATE_UPDATE, WS_LOCK_UNLOCK]).await
+            }
+            AnyState::DoorState(DoorState::Open) => {
+                self.door_state = Some(DoorState::Open);
+                WebsocketFrame::send(&mut writer, &mut [WS_STATE_UPDATE, WS_DOOR_OPEN]).await
+            }
+            AnyState::DoorState(DoorState::Closed) => {
+                self.door_state = Some(DoorState::Closed);
+                WebsocketFrame::send(&mut writer, &mut [WS_STATE_UPDATE, WS_DOOR_CLOSED]).await
+            }
+        } {
+            error!("websocket: error writing to socket: {}", e);
+            return Err("error writing to websocket");
+        }
+
+        Ok(())
     }
 
     pub async fn run_ws<'a, 'b>(
         &mut self,
         sock: &mut TcpSocket<'b>,
-        buff: &mut [u8],
+        mut buff: &mut [u8],
         cmd_channel: &Sender<'static, CriticalSectionRawMutex, LockState, 2>,
         state_sub: &mut Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 6, 0>,
     ) -> Result<(), &'static str> {
-        //todo: websockets have a specific framing structure that we need to implement:
-        // https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#exchanging_data_frames
+        let (mut reader, mut writer) = sock.split();
+
+        // For the first client on the task, there will be states in the state sub queue.
+        // For subsequent clients, we will need to send retined states.
+        if let Some(door_state) = self.door_state {
+            self.send_state_via_ws(&mut writer, AnyState::DoorState(door_state))
+                .await?;
+        }
+        if let Some(lock_state) = self.lock_state {
+            self.send_state_via_ws(&mut writer, AnyState::LockState(lock_state))
+                .await?;
+        }
+
         loop {
-            info!("websocket processor waiting for state update or data from client");
+            info!("websocket: waiting for state update or data from client");
+            buff.fill(0u8);
             match select::select(
-                sock.read_exact(&mut buff[..size_of::<u8>()]),
+                WebsocketFrame::receive(&mut reader, &mut buff),
                 state_sub.next_message_pure(),
             )
             .await
             {
-                select::Either::First(Ok(())) => {
-                    info!("processing client data");
-                    match buff[0] {
-                        WS_STATE_UPDATE => {
-                            match sock.read_exact(&mut buff[..size_of::<u8>()]).await {
-                                Ok(()) => match buff[0] {
-                                    WS_LOCK_LOCK => cmd_channel.send(LockState::Locked).await,
-                                    WS_LOCK_UNLOCK => cmd_channel.send(LockState::Unlocked).await,
-                                    _ => warn!(
-                                        "received unknown state update from websocket: {}",
-                                        buff[0]
-                                    ),
-                                },
-                                Err(ReadExactError::UnexpectedEof) => {
-                                    info!("websocket: client closed websocket connection");
-                                    return Ok(());
-                                }
-                                Err(ReadExactError::Other(e)) => {
-                                    error!("websocket: error reading from connection: {}", e);
-                                    return Err("websocket finished with error");
-                                }
-                            }
-                        }
+                select::Either::First(Ok(ws)) => {
+                    info!("websocket: processing client data");
+
+                    if ws.opcode == 8 {
+                        // connection close
+                        return Ok(());
+                    }
+
+                    let data = &buff[..ws.len];
+                    if data.len() < 2 {
+                        error!("websocket messages should have at least 2 bytes of data");
+                        return Err("websocket protocol err");
+                    }
+
+                    match data[0] {
+                        WS_STATE_UPDATE => match data[1] {
+                            WS_LOCK_LOCK => cmd_channel.send(LockState::Locked).await,
+                            WS_LOCK_UNLOCK => cmd_channel.send(LockState::Unlocked).await,
+                            _ => warn!("received unknown state update from websocket: {}", buff[0]),
+                        },
                         WS_CONFIG_UPDATE => {
                             // read a u32 size, then that number of bytes
                             // decode the config and store it, and reboot.
@@ -214,33 +311,17 @@ impl HttpService {
                         }
                     }
                 }
-                select::Either::First(Err(ReadExactError::UnexpectedEof)) => {
-                    info!("websocket: client closed websocket connection");
+                select::Either::First(Err(e @ WebsocketError::NetworkError)) => {
+                    info!("websocket: {:?}", e);
                     return Ok(());
                 }
-                select::Either::First(Err(ReadExactError::Other(e))) => {
-                    error!("websocket: error reading from connection: {}", e);
+                select::Either::First(Err(e)) => {
+                    error!("websocket: error receiving websocket frame: {:?}", e);
                     return Err("websocket finished with error");
                 }
                 select::Either::Second(state) => {
-                    info!("processing state update");
-                    if let Err(e) = match state {
-                        AnyState::LockState(LockState::Locked) => {
-                            sock.write(&[WS_STATE_UPDATE, WS_LOCK_LOCK]).await
-                        }
-                        AnyState::LockState(LockState::Unlocked) => {
-                            sock.write(&[WS_STATE_UPDATE, WS_LOCK_UNLOCK]).await
-                        }
-                        AnyState::DoorState(DoorState::Open) => {
-                            sock.write(&[WS_STATE_UPDATE, WS_DOOR_OPEN]).await
-                        }
-                        AnyState::DoorState(DoorState::Closed) => {
-                            sock.write(&[WS_STATE_UPDATE, WS_DOOR_CLOSED]).await
-                        }
-                    } {
-                        error!("websocket: error writing to socket: {}", e);
-                        return Err("error writing to websocket");
-                    }
+                    info!("websocket: processing state update");
+                    self.send_state_via_ws(&mut writer, state).await?;
                 }
             }
         }

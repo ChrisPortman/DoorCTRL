@@ -1,160 +1,543 @@
-use base64ct::{Base64, Encoding};
+use core::mem::discriminant;
 use embedded_io_async::Write;
-use sha1::{Digest, Sha1};
 
-use crate::{AsciiInt, CR, LF};
+use crate::ascii::{AsciiInt, CR, LF, SP};
+use crate::header::HttpHeader;
+use crate::{HTTPError, HttpWrite};
 
-const RESPONSE_101: &'static str = "HTTP/1.1 101 Switching Protocols\r
-Upgrade: websocket\r
-Connection: Upgrade\r
-Sec-WebSocket-Accept: ";
+const HTTP_PROTO: &str = "HTTP/1.1";
 
-const RESPONSE_400: &'static str = "HTTP/1.1 400 Bad Request\r
-Server: DoorCtrl\r
-Content-Type: text/html\r
-Content-Length: ";
-
-const RESPONSE_400_BODY: &'static str = "
-<!DOCTYPE html>
-<html>
-<head>
-<title>DoorCTRL</title>
-</head>
-<body>
-<p>400 Request not supported</p>
-</body>
-</html>
-";
-
-const RESPONSE_404: &'static str = "HTTP/1.1 404 Not Found\r
-Server: DoorCtrl\r
-Content-Type: text/html\r
-Content-Length: ";
-
-const RESPONSE_404_BODY: &'static str = "
-<!DOCTYPE html>
-<html>
-<head>
-<title>DoorCTRL</title>
-</head>
-<body>
-<p>404 Not Found</p>
-</body>
-</html>
-";
-
-const RESPONSE_200: &'static str = "HTTP/1.1 200 OK\r
-Server: DoorCtrl\r
-Content-Type: text/html\r
-Content-Length: ";
-
-pub const RESPONSE_200_BODY: &'static str = "
-<!DOCTYPE html>
-<html>
-<head>
-<title>DoorCTRL</title>
-</head>
-<body>
-
-<h1>DoorCTL is Alive</h1>
-<p>Apparently the web server works...</p>
-
-<script>
-const ws = new WebSocket('/ws');
-
-ws.addEventListener('open', (e) => {
-  console.log('websocket opened');
-  console.log(e);
-});
-
-ws.addEventListener('error', (e) => {
-  console.log('websocket error');
-  console.log(e);
-});
-
-ws.addEventListener('close', (e) => {
-  console.log('websocket closed');
-  console.log(e);
-});
-
-ws.addEventListener('message', (e) => {
-  console.log('websocket message received');
-  console.log(e);
-});
-</script>
-</body>
-</html>
-";
-
-const HTTP_WRITE_ERR: &'static str = "error writing http response to destination";
-
-pub async fn respond<T: Write>(code: u16, dest: &mut T) -> Result<(), &'static str> {
-    let headers: &[u8];
-    let body: &[u8];
-
-    match code {
-        200 => {
-            headers = RESPONSE_200.as_bytes();
-            body = RESPONSE_200_BODY.as_bytes();
-        }
-        400 => {
-            headers = RESPONSE_400.as_bytes();
-            body = RESPONSE_400_BODY.as_bytes();
-        }
-        404 => {
-            headers = RESPONSE_404.as_bytes();
-            body = RESPONSE_404_BODY.as_bytes();
-        }
-        _ => {
-            return Err("unsupported http code");
-        }
-    };
-
-    let content_len: AsciiInt = (body.len() as u64).into();
-
-    if let Err(_) = dest.write(headers).await {
-        return Err(HTTP_WRITE_ERR);
-    }
-    if let Err(_) = dest.write(&content_len.as_bytes()).await {
-        return Err(HTTP_WRITE_ERR);
-    }
-    if let Err(_) = dest.write(&[CR, LF, CR, LF]).await {
-        return Err(HTTP_WRITE_ERR);
-    }
-    if let Err(_) = dest.write(body).await {
-        return Err(HTTP_WRITE_ERR);
-    }
-
-    Ok(())
+#[derive(Clone, Copy)]
+pub enum HttpStatusCode {
+    SwitchingProtocols,
+    OK,
+    BadRequest,
+    NotFound,
+    InternalServerError,
+    Other(u16),
 }
 
-const SEC_WEBSOCKET_ACCEPT_MAGIC: &'static str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+impl HttpWrite for HttpStatusCode {
+    #[rustfmt::skip]
+    async fn write<T: Write>(self, writer: &mut T) -> Result<(), HTTPError> {
+        let other: AsciiInt;
+        let data = match self {
+            Self::SwitchingProtocols => "101 Switching Protocols",
+            Self::OK => "200 OK",
+            Self::BadRequest => "400 Bad Request",
+            Self::NotFound => "404 Not Found",
+            Self::InternalServerError => "500 Internal Server Error",
+            Self::Other(n) => {
+                if n <100 || n > 599 {
+                    return Err(HTTPError::ProtocolError("invalid status code"));
+                }
+                other = AsciiInt::from(n as u64);
+                other.as_str()
+            }
+        };
 
-pub async fn respond_websocket<T: Write>(key: &str, dest: &mut T) -> Result<(), &'static str> {
-    let mut key_hasher = Sha1::new();
-    key_hasher.update(key.as_bytes());
-    key_hasher.update(SEC_WEBSOCKET_ACCEPT_MAGIC.as_bytes());
-    let key_hash = key_hasher.finalize();
+        writer.write_all(HTTP_PROTO.as_bytes()).await
+            .and(writer.write_all(&[SP]).await
+            .and(writer.write_all(data.as_bytes()).await
+            .and(writer.write_all(&[CR, LF]).await
+        ))).or(Err(HTTPError::NetworkError("connnection reset by peer")))
+    }
+}
 
-    let mut key_b64_buff = [0u8; 28];
-    let encoded = match Base64::encode(&key_hash, &mut key_b64_buff) {
-        Ok(e) => e,
-        Err(_) => {
-            return Err("error enoding key hash");
+pub struct HttpResponse<'a, const MAX_EXTRA_HEADERS: usize> {
+    status_code: HttpStatusCode,
+    server: HttpHeader<'a>,
+    content_type: HttpHeader<'a>,
+    content_length: HttpHeader<'a>,
+    extra_headers: [Option<HttpHeader<'a>>; MAX_EXTRA_HEADERS],
+}
+
+impl<'a, const MAX_EXTRA_HEADERS: usize> HttpResponse<'a, MAX_EXTRA_HEADERS> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_status(&self) -> HttpStatusCode {
+        self.status_code
+    }
+
+    pub fn set_status(&mut self, status: HttpStatusCode) {
+        self.status_code = status
+    }
+
+    pub fn set_server(&mut self, server: &'a str) {
+        self.server = HttpHeader::Server(server)
+    }
+
+    pub fn set_content_type(&mut self, ct: &'a str) {
+        self.content_type = HttpHeader::ContentType(ct)
+    }
+
+    pub fn add_extra_header(&mut self, header: HttpHeader<'a>) -> Result<(), HTTPError> {
+        let mut slot: Option<usize> = None;
+
+        for (i, existing) in self.extra_headers.iter().enumerate() {
+            match existing {
+                Some(existing) => {
+                    if discriminant(existing) == discriminant(&header) {
+                        if matches!((existing, header), (HttpHeader::Other(ek, _), HttpHeader::Other(nk, _)) if *ek != nk)
+                        {
+                            // Both headers are custom, but for different custom headers
+                            continue;
+                        }
+                        self.extra_headers[i] = Some(header);
+                        return Ok(());
+                    }
+                }
+                None => {
+                    if let None = slot {
+                        slot = Some(i);
+                    }
+                }
+            };
         }
-    };
 
-    if let Err(_) = dest.write(RESPONSE_101.as_bytes()).await {
-        return Err(HTTP_WRITE_ERR);
+        if let Some(slot) = slot {
+            self.extra_headers[slot] = Some(header);
+            return Ok(());
+        }
+
+        Err(HTTPError::ExtraHeadersExceeded)
     }
 
-    if let Err(_) = dest.write(&encoded.as_bytes()).await {
-        return Err(HTTP_WRITE_ERR);
+
+    #[rustfmt::skip]
+    pub async fn send<T: Write>(self, writer: &mut T) -> Result<(), HTTPError> {
+        self.status_code.write(writer).await
+            .and(self.server.write(writer).await)
+            .and(self.content_type.write(writer).await)?;
+
+        if let HttpHeader::ContentLength(1..) = self.content_length {
+            self.content_length.write(writer).await?;
+        }
+
+        for head in self.extra_headers {
+            if let Some(head) = head {
+                 head.write(writer).await?;
+            }
+        }
+
+        writer.write_all(&[CR, LF]).await
+            .or(Err(HTTPError::NetworkError("connection reset by peer")))?;
+
+        Ok(())
     }
 
-    if let Err(_) = dest.write(&[CR, LF, CR, LF]).await {
-        return Err(HTTP_WRITE_ERR);
+    pub async fn send_with_body<T: Write>(
+        mut self,
+        writer: &mut T,
+        body: &[u8],
+    ) -> Result<(), HTTPError> {
+        self.content_length = HttpHeader::ContentLength(body.len());
+        self.send(writer)
+            .await
+            .or(Err(HTTPError::NetworkError("connection closed by peer")))?;
+
+        writer
+            .write_all(body)
+            .await
+            .or(Err(HTTPError::NetworkError("connection closed by peer")))?;
+
+        Ok(())
+    }
+}
+
+impl<'a, const MAX_EXTRA_HEADERS: usize> Default for HttpResponse<'a, MAX_EXTRA_HEADERS> {
+    fn default() -> Self {
+        Self {
+            status_code: HttpStatusCode::OK,
+            server: HttpHeader::Server("RustServer"),
+            content_type: HttpHeader::ContentType("text/html"),
+            content_length: HttpHeader::ContentLength(0),
+            extra_headers: [None; MAX_EXTRA_HEADERS],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use embedded_io_async::{ErrorKind, ErrorType};
+    use std::vec::Vec;
+    use std::*;
+
+    use super::*;
+
+    struct TestWriter<'a> {
+        inner: &'a mut Vec<u8>,
     }
 
-    Ok(())
+    impl<'a> TestWriter<'a> {
+        fn new(inner: &'a mut Vec<u8>) -> Self {
+            Self { inner: inner }
+        }
+    }
+
+    impl<'a> ErrorType for TestWriter<'a> {
+        type Error = ErrorKind;
+    }
+
+    impl<'a> Write for TestWriter<'a> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.inner.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        async fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+            self.inner.extend_from_slice(buf);
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    // HTTP uses `\r\n` as EOL delimeters.  In the expected data, we manually add
+    // the \r at the end of the line, before the inherrent \n.
+
+    #[tokio::test]
+    async fn test_http_response_default() {
+        let resp = HttpResponse::<3>::new();
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: text/html\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_default_with_body() {
+        let resp = HttpResponse::<3>::new();
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        let body = "<html>
+    <head>
+    <title>Testing</title>
+    </head>
+    <body>
+        <p>works!</p>
+    </body>
+</html>
+"
+        .as_bytes();
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: text/html\r
+Content-Length: 110\r
+\r
+<html>
+    <head>
+    <title>Testing</title>
+    </head>
+    <body>
+        <p>works!</p>
+    </body>
+</html>
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send_with_body(&mut writer, body).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_status() {
+        let mut resp = HttpResponse::<3>::new();
+        resp.set_status(HttpStatusCode::NotFound);
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        let expected = "HTTP/1.1 404 Not Found\r
+Server: RustServer\r
+Content-Type: text/html\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_custom_status() {
+        let mut resp = HttpResponse::<3>::new();
+        resp.set_status(HttpStatusCode::Other(401));
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        let expected = "HTTP/1.1 401\r
+Server: RustServer\r
+Content-Type: text/html\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_custom_content_type() {
+        let mut resp = HttpResponse::<3>::new();
+        resp.set_content_type("application/json");
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: application/json\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_custom_server() {
+        let mut resp = HttpResponse::<3>::new();
+        resp.set_server("FancyServer");
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: FancyServer\r
+Content-Type: text/html\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_one_extra_header() {
+        let mut resp = HttpResponse::<3>::new();
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo", "Bar")) {
+            self::panic!("{:?}", e);
+        }
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: text/html\r
+Foo: Bar\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_replaced_extra_header() {
+        let mut resp = HttpResponse::<3>::new();
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo", "Bar")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo", "Baz")) {
+            self::panic!("{:?}", e);
+        }
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: text/html\r
+Foo: Baz\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_multiple_extra_header() {
+        let mut resp = HttpResponse::<3>::new();
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-One", "Bar")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Two", "Baz")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Three", "Bat")) {
+            self::panic!("{:?}", e);
+        }
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: text/html\r
+Foo-One: Bar\r
+Foo-Two: Baz\r
+Foo-Three: Bat\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_multiple_replaced_extra_header() {
+        let mut resp = HttpResponse::<3>::new();
+        let mut dst = Vec::<u8>::new();
+        let mut writer = TestWriter::new(&mut dst);
+
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-One", "Bar")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Two", "Baz")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Three", "Bat")) {
+            self::panic!("{:?}", e);
+        }
+
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Two", "Updated")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Three", "Updated")) {
+            self::panic!("{:?}", e);
+        }
+
+        let expected = "HTTP/1.1 200 OK\r
+Server: RustServer\r
+Content-Type: text/html\r
+Foo-One: Bar\r
+Foo-Two: Updated\r
+Foo-Three: Updated\r
+\r
+"
+        .as_bytes();
+
+        if let Err(e) = resp.send(&mut writer).await {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            &dst,
+            expected,
+            "oops, got:\n{}",
+            str::from_utf8(&dst).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_response_with_excess_headers_errors() {
+        let mut resp = HttpResponse::<3>::new();
+
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-One", "Bar")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Two", "Baz")) {
+            self::panic!("{:?}", e);
+        }
+        if let Err(e) = resp.add_extra_header(HttpHeader::Other("Foo-Three", "Bat")) {
+            self::panic!("{:?}", e);
+        }
+
+        assert_eq!(
+            resp.add_extra_header(HttpHeader::Other("Oops", "Too Many")),
+            Err(HTTPError::ExtraHeadersExceeded)
+        );
+    }
 }

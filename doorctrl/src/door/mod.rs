@@ -47,6 +47,14 @@ where
             self.last_reed_state = PinState::High;
         }
 
+        if let Err(e) = self.lock().await {
+            error!("error locking door: {}", e.kind());
+        }
+
+        // publish initial door states to the state channel
+        self.state_channel
+            .publish_immediate(AnyState::DoorState(self.door_state()));
+
         loop {
             let work = select::select(
                 self.cmd_channel.receive(),
@@ -73,7 +81,7 @@ where
                         Ok(result) => {
                             if result {
                                 if self.last_reed_state == PinState::High {
-                                    // Low to High transition
+                                    // High to Low transition
                                     info!("door is closed");
                                     self.state_channel
                                         .publish_immediate(AnyState::DoorState(DoorState::Closed));
@@ -81,7 +89,7 @@ where
                                 self.last_reed_state = PinState::Low;
                             } else {
                                 if self.last_reed_state == PinState::Low {
-                                    // High to Low transition
+                                    // Low to High transition
                                     info!("door is Open");
                                     self.state_channel
                                         .publish_immediate(AnyState::DoorState(DoorState::Open));
@@ -95,6 +103,24 @@ where
                 select::Either::Second(Err(e)) => {
                     error!("error waiting for reed pin: {}", e.kind());
                 }
+            }
+        }
+    }
+
+    pub fn door_state(&self) -> DoorState {
+        match self.last_reed_state {
+            PinState::Low => DoorState::Closed,
+            PinState::High => DoorState::Open,
+        }
+    }
+
+    pub fn lock_state(&mut self) -> LockState {
+        match self.lock_pin.is_set_low() {
+            Ok(true) => LockState::Locked,
+            Ok(false) => LockState::Unlocked,
+            Err(_) => {
+                error!("door: lock pin state not available");
+                LockState::Unlocked
             }
         }
     }
