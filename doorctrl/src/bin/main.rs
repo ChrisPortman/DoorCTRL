@@ -14,7 +14,7 @@ use defmt::{error, info};
 use embassy_executor::Spawner;
 use embassy_net::{
     tcp::client::{TcpClient, TcpClientState},
-    Runner, Stack, StackResources,
+    Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
 };
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -24,19 +24,28 @@ use embassy_sync::{
 use embassy_time::{Duration, Timer};
 use embedded_nal_async::TcpConnect;
 use esp_alloc as _;
+use esp_bootloader_esp_idf::partitions;
 use esp_hal::clock::{Clock, CpuClock};
 use esp_hal::efuse::Efuse;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+#[cfg(target_arch = "riscv32")]
+use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rng::Rng;
-use esp_hal::timer::{systimer::SystemTimer, timg::TimerGroup};
+use esp_hal::timer::timg::TimerGroup;
 
-use esp_wifi::{
-    init,
-    wifi::{ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiState},
-    EspWifiController,
+use esp_radio::{
+    wifi::{
+        AccessPointConfig, AuthMethod, ClientConfig, ModeConfig, ScanConfig, WifiApState,
+        WifiController, WifiDevice, WifiEvent, WifiStaState,
+    },
+    Controller,
 };
+use esp_storage::FlashStorage;
+use heapless::Vec;
 
+use doorctrl::conf::ConfigV1;
 use doorctrl::mk_static;
+
 use doorctrl::ws2812::{LED, WS2812B};
 use doorctrl::{
     door::Door,
@@ -84,63 +93,25 @@ fn mac_to_hex(mac: [u8; 6]) -> [u8; 12] {
     hex
 }
 
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    // generator version: 0.5.0
-
-    rtt_target::rtt_init_defmt!();
-
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let peripherals = esp_hal::init(config);
-
-    // Init RGB
-    let mhz = CpuClock::_80MHz.frequency().as_mhz();
-    let led = LED {
-        inner: WS2812B::new(peripherals.RMT, mhz, peripherals.GPIO8).expect("create LED failed"),
-    };
-    spawner.spawn(blink(led)).expect("failed to spawn blink");
-
-    let device_id = mk_static!([u8; 12], mac_to_hex(Efuse::read_base_mac_address()));
-    info!("{}", device_id);
-
-    let timer0 = SystemTimer::new(peripherals.SYSTIMER);
-    esp_hal_embassy::init(timer0.alarm0);
-
-    info!("Embassy initialized!");
-
+    let hal_config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let peripherals = esp_hal::init(hal_config);
+    let rng = Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
     esp_alloc::heap_allocator!(size: 72 * 1024);
 
-    // Init wifi hardware
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let mut rng = Rng::new(peripherals.RNG);
-
-    let esp_wifi_ctrl = &*mk_static!(
-        EspWifiController<'static>,
-        init(timg0.timer0, rng.clone()).unwrap()
+    #[cfg(target_arch = "riscv32")]
+    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(
+        timg0.timer0,
+        #[cfg(target_arch = "riscv32")]
+        sw_int.software_interrupt0,
     );
+    info!("Embassy initialized!");
 
-    let (controller, interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
-
-    let wifi_interface = interfaces.sta;
-    spawner.spawn(wifi_connection(controller)).ok();
-    info!("WIFI initialized!");
-
-    // Init Network stack
-    let config = embassy_net::Config::dhcpv4(Default::default());
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-    let (stack, runner) = embassy_net::new(
-        wifi_interface,
-        config,
-        mk_static!(
-            StackResources<SOCKET_NUM>,
-            StackResources::<SOCKET_NUM>::new()
-        ),
-        seed,
-    );
-    spawner.spawn(net_task(runner)).ok();
-    info!("Network initialized");
-
-    // Some task comms
+    // Some task comm
     // cmd_channel is for processing incomming command from external sources (i.e. lock/unlock)
     let cmd_channel = mk_static!(
         Channel::<CriticalSectionRawMutex, LockState, 2>,
@@ -152,17 +123,92 @@ async fn main(spawner: Spawner) {
         PubSubChannel::<CriticalSectionRawMutex, AnyState, 2, 6, 0>::new()
     );
 
-    spawner
-        .spawn(mqtt_service(
-            stack,
-            device_id,
-            cmd_channel.sender(),
-            state_pubsub
-                .subscriber()
-                .inspect_err(|e| error!("error subscribing to states for mqtt_service: {}", e))
-                .unwrap(),
+    // Real Time Trasfer protocol for probe-rs logging etc.
+    rtt_target::rtt_init_defmt!();
+
+    // Flash Memory
+    let mut flash = FlashStorage::new(peripherals.FLASH);
+    let mut partition_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let partition_info = partitions::read_partition_table(&mut flash, &mut partition_buf).unwrap();
+    let nvs = partition_info
+        .find_partition(partitions::PartitionType::Data(
+            partitions::DataPartitionSubType::Nvs,
         ))
-        .ok();
+        .unwrap()
+        .unwrap();
+    let nvs_part = nvs.as_embedded_storage(&mut flash);
+
+    // Init RGB
+    let mhz = CpuClock::_80MHz.frequency().as_mhz();
+    let led = LED {
+        inner: WS2812B::new(peripherals.RMT, mhz, peripherals.GPIO8).expect("create LED failed"),
+    };
+    spawner.spawn(blink(led)).expect("failed to spawn blink");
+
+    let device_id = mk_static!([u8; 12], mac_to_hex(Efuse::read_base_mac_address()));
+    info!("{}", device_id);
+
+    // Init the door
+    let lock_pin = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+    let reed_pin = Input::new(
+        peripherals.GPIO2,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    let door = Door::new(
+        lock_pin,
+        reed_pin,
+        cmd_channel.receiver(),
+        state_pubsub.immediate_publisher(),
+    );
+    spawner.spawn(door_service(door)).ok();
+
+    // Init wifi hardware
+    let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
+    let (controller, interfaces) =
+        esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+    let mut wifi_interface = interfaces.sta;
+
+    let config = match ConfigV1::load(nvs_part) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(
+                "error loading config: {:?}. proceding as if unconfigured",
+                e
+            );
+            None
+        }
+    };
+
+    let mut net_config = embassy_net::Config::dhcpv4(Default::default());
+
+    match config {
+        Some(_) => {
+            spawner.spawn(wifi_client(controller)).ok();
+        }
+        None => {
+            spawner.spawn(wifi_ap(controller)).ok();
+            net_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
+                address: Ipv4Cidr::new(Ipv4Addr::new(192, 168, 0, 1), 24),
+                gateway: None,
+                dns_servers: Vec::<_, 3>::new(),
+            });
+            wifi_interface = interfaces.ap;
+        }
+    }
+
+    // Init Network stack
+    let (stack, runner) = embassy_net::new(
+        wifi_interface,
+        net_config,
+        mk_static!(
+            StackResources<SOCKET_NUM>,
+            StackResources::<SOCKET_NUM>::new()
+        ),
+        seed,
+    );
+
+    spawner.spawn(net_task(runner)).ok();
+    info!("Network initialized");
 
     for _ in 0..4 {
         info!("starting a web server task");
@@ -178,20 +224,19 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // Init the door
-    let lock_pin = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
-    let reed_pin = Input::new(
-        peripherals.GPIO2,
-        InputConfig::default().with_pull(Pull::Up),
-    );
-    let door = Door::new(
-        lock_pin,
-        reed_pin,
-        cmd_channel.receiver(),
-        state_pubsub.immediate_publisher(),
-    );
-
-    spawner.spawn(door_service(door)).ok();
+    if let Some(c) = config {
+        spawner
+            .spawn(mqtt_service(
+                stack,
+                device_id,
+                cmd_channel.sender(),
+                state_pubsub
+                    .subscriber()
+                    .inspect_err(|e| error!("error subscribing to states for mqtt_service: {}", e))
+                    .unwrap(),
+            ))
+            .ok();
+    }
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
@@ -199,12 +244,39 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn wifi_connection(mut controller: WifiController<'static>) -> ! {
-    info!("start connection task");
+async fn wifi_ap(mut controller: WifiController<'static>) -> ! {
     info!("Device capabilities: {:?}", controller.capabilities());
     loop {
-        match esp_wifi::wifi::wifi_state() {
-            WifiState::StaConnected => {
+        match esp_radio::wifi::ap_state() {
+            WifiApState::Started => {
+                // wait until we're no longer connected
+                controller.wait_for_event(WifiEvent::ApStop).await;
+                Timer::after(Duration::from_millis(5000)).await
+            }
+            _ => {}
+        }
+        if !matches!(controller.is_started(), Ok(true)) {
+            let ap_config = AccessPointConfig::default()
+                .with_ssid("DoorControl".into())
+                .with_auth_method(AuthMethod::Wpa2Personal)
+                .with_password("new_door_control".into());
+            let client_config = ModeConfig::AccessPoint(ap_config);
+
+            if let Err(e) = controller.set_config(&client_config) {
+                error!("wifi AP configuration error: {}", e);
+            }
+            controller.start_async().await.unwrap();
+            info!("Wifi AP started!");
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn wifi_client(mut controller: WifiController<'static>) -> ! {
+    info!("Device capabilities: {:?}", controller.capabilities());
+    loop {
+        match esp_radio::wifi::sta_state() {
+            WifiStaState::Connected => {
                 // wait until we're no longer connected
                 controller.wait_for_event(WifiEvent::StaDisconnected).await;
                 Timer::after(Duration::from_millis(5000)).await
@@ -212,23 +284,28 @@ async fn wifi_connection(mut controller: WifiController<'static>) -> ! {
             _ => {}
         }
         if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = Configuration::Client(ClientConfiguration {
-                ssid: SSID.into(),
-                password: PASSWORD.into(),
-                ..Default::default()
-            });
-            controller.set_configuration(&client_config).unwrap();
-            info!("Starting wifi");
-            controller.start_async().await.unwrap();
-            info!("Wifi started!");
+            let client_config = ModeConfig::Client(
+                ClientConfig::default()
+                    .with_ssid(SSID.into())
+                    .with_password(PASSWORD.into()),
+            );
 
-            info!("Scan");
-            let result = controller.scan_n_async(10).await.unwrap();
+            if let Err(e) = controller.set_config(&client_config) {
+                error!("wifi station configuration error: {}", e);
+            }
+
+            controller.start_async().await.unwrap();
+
+            let scan_config = ScanConfig::default().with_max(10);
+            let result = controller
+                .scan_with_config_async(scan_config)
+                .await
+                .unwrap();
             for ap in result {
                 info!("Found SSID: {}", ap.ssid);
             }
         }
-        info!("About to connect...");
+        info!("WIFI connecting ...");
 
         match controller.connect_async().await {
             Ok(_) => info!("Wifi connected!"),
@@ -319,7 +396,8 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn blink(mut led: LED) -> ! {
+async fn blink(mut led: LED<'static>) -> ! {
+    info!("blinking led");
     let rgbs: [[u8; 3]; 6] = [
         [1, 0, 0],
         [1, 1, 0],

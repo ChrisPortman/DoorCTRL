@@ -155,6 +155,28 @@
                         </svg>
                     </div>
                 </div>
+                <div id="config-modal">
+                    <label for="device_name">Device Name</label>
+                    <input type="text" id="device_name" name="device_name" oninput="updateConfig(this)"><br>
+                    <fieldset>
+                        <legend>Wifi</legend>
+                        <label for="wifi_ssid">WiFi Network</label>
+                        <input type="text" id="wifi_ssid" name="wifi_ssid" oninput="updateConfig(this)"><br>
+                        <label for="wifi_pass">WiFi Password:</label>
+                        <input type="password" id="wifi_pass" name="wifi_pass" oninput="updateConfig(this)"><br>
+                    </fieldset>
+                    <fieldset>
+                        <legend>MQTT</legend>
+                        <label for="mqtt_host">MQTT Host</label>
+                        <input type="text" id="mqtt_host" name="mqtt_host" oninput="updateConfig(this)"><br>
+                        <label for="mqtt_port">MQTT Port</label>
+                        <input type="number" id="mqtt_port" name="mqtt_port" value="1883"
+                            oninput="updateConfig(this)"><br>
+                        <label for="mqtt_pass">MQTT Password:</label>
+                        <input type="password" id="wifi_pass" name="mqtt_pass" oninput="updateConfig(this)"><br>
+                    </fieldset>
+                    <button id="config_save" onclick="saveConfig()">Save</button>
+                </div>
             </div>
 
             <div class="footer">
@@ -164,7 +186,7 @@
     </div>
 
     <script>
-        var ws = new WebSocket('/ws');
+        // var ws = new WebSocket('/ws');
         const ws_status_update = 1;
         const ws_status_update_lock = 1;
         const ws_status_update_unlock = 2;
@@ -173,6 +195,32 @@
 
         var doorOpen = false;
         var locked = true;
+
+
+        var config = {
+            device_name: "",
+            wifi_ssid: "",
+            wifi_pass: "",
+            mqtt_host: "",
+            mqtt_port: "1883",
+            mqtt_pass: "",
+        }
+
+        function updateConfig(field) {
+            config[field.name] = field.value;
+        }
+
+        function saveConfig() {
+            console.log(config);
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify(config));
+
+            var payload = new Uint8Array(data.length + 1);
+            payload[0] = 2;
+            payload.set(data, 1);
+
+            wsSend(payload);
+        }
 
 
         function openDoor() {
@@ -269,33 +317,33 @@
         const lockElem = document.getElementById("lock");
         lockElem.addEventListener("click", toggleLock);
 
-        ws.addEventListener('open', (e) => {
-            console.log('websocket opened');
-            console.log(e);
-        });
-
-        ws.addEventListener('error', (e) => {
-            console.log('websocket error');
-            console.log(e);
-        });
-
-        ws.addEventListener('close', (e) => {
-            console.log('websocket closed');
-            console.log(e);
-        });
-
-        ws.addEventListener('message', (e) => {
-            console.log('websocket message received');
-            console.log(e);
-            e.data.bytes().then(
-                (data) => {
-                    console.log(data);
-                    if (data.length == 2 && data[0] === ws_status_update) {
-                        processStateUpdate(data[1]);
-                    }
-                }
-            );
-        });
+        // ws.addEventListener('open', (e) => {
+        //     console.log('websocket opened');
+        //     console.log(e);
+        // });
+        //
+        // ws.addEventListener('error', (e) => {
+        //     console.log('websocket error');
+        //     console.log(e);
+        // });
+        //
+        // ws.addEventListener('close', (e) => {
+        //     console.log('websocket closed');
+        //     console.log(e);
+        // });
+        //
+        // ws.addEventListener('message', (e) => {
+        //     console.log('websocket message received');
+        //     console.log(e);
+        //     e.data.bytes().then(
+        //         (data) => {
+        //             console.log(data);
+        //             if (data.length == 2 && data[0] === ws_status_update) {
+        //                 processStateUpdate(data[1]);
+        //             }
+        //         }
+        //     );
+        // });
 
     </script>
 </body>

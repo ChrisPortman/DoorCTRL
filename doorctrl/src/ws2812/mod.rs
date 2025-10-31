@@ -1,10 +1,7 @@
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{Level, Output, OutputConfig, OutputPin};
 use esp_hal::peripherals::RMT;
-use esp_hal::rmt::{
-    Channel, ConstChannelAccess, PulseCode, Rmt, Tx, TxChannelAsync, TxChannelConfig,
-    TxChannelCreator,
-};
+use esp_hal::rmt::{Channel, PulseCode, Rmt, Tx, TxChannelConfig, TxChannelCreator};
 use esp_hal::time::Rate;
 use esp_hal::Async;
 
@@ -24,14 +21,14 @@ impl From<esp_hal::rmt::Error> for Error {
     }
 }
 
-pub struct WS2812B {
+pub struct WS2812B<'a> {
     red: u8,
     green: u8,
     blue: u8,
-    ch: Channel<Async, ConstChannelAccess<Tx, 0>>,
+    ch: Channel<'a, Async, Tx>,
 }
 
-impl WS2812B {
+impl<'a> WS2812B<'a> {
     /// Create a WS2812B instance with RGB(0, 0, 0)
     ///
     /// Here's an example:
@@ -39,9 +36,9 @@ impl WS2812B {
     /// ```
     /// let mut led = WS2812B::new(peripherals.RMT, 80, peripherals.GPIO8)?;
     /// ```
-    pub fn new<P>(rmt: RMT, freq_mhz: u32, gpio: P) -> Result<Self, Error>
+    pub fn new<P>(rmt: RMT<'a>, freq_mhz: u32, gpio: P) -> Result<Self, Error>
     where
-        P: OutputPin,
+        P: OutputPin + 'a,
     {
         let rmt = Rmt::new(rmt, Rate::from_mhz(freq_mhz))?.into_async();
         let output: Output<'_> = Output::new(gpio, Level::High, OutputConfig::default());
@@ -85,8 +82,8 @@ impl WS2812B {
         }
 
         // Create final stream of data.
-        let mut data: [u32; BRG_PACKET_SIZE * BRG_MAX_NUM_OF_LEDS] =
-            [u32::default(); BRG_PACKET_SIZE * BRG_MAX_NUM_OF_LEDS];
+        let mut data: [PulseCode; BRG_PACKET_SIZE * BRG_MAX_NUM_OF_LEDS] =
+            [PulseCode::default(); BRG_PACKET_SIZE * BRG_MAX_NUM_OF_LEDS];
 
         // Create RGB packet. (Always the same for now.)
         let packet = self.build_packet();
@@ -96,7 +93,7 @@ impl WS2812B {
             data[index..(index + BRG_PACKET_SIZE)].copy_from_slice(&packet);
         }
 
-        data[num * BRG_PACKET_SIZE] = PulseCode::empty();
+        data[num * BRG_PACKET_SIZE] = PulseCode::end_marker();
         // Slice one index extra to fit the `PulseCode::empty()`;
         self.dispatch(&data[0..((num * BRG_PACKET_SIZE) + 1)])
             .await?;
@@ -104,25 +101,25 @@ impl WS2812B {
         Ok(())
     }
 
-    async fn dispatch(&mut self, data: &[u32]) -> Result<(), Error> {
+    async fn dispatch(&mut self, data: &[PulseCode]) -> Result<(), Error> {
         self.ch.transmit(&data).await?;
         Ok(())
     }
 
     // Reference https://cdn-shop.adafruit.com/datasheets/WS2812.pdf
     // in ns: 700/600
-    fn get_bit_one(&self) -> u32 {
+    fn get_bit_one(&self) -> PulseCode {
         PulseCode::new(Level::High, 14, Level::Low, 12)
     }
 
     // in ns: 350/800
-    fn get_bit_zero(&self) -> u32 {
+    fn get_bit_zero(&self) -> PulseCode {
         // PulseCode::new(Level::High, 8, Level::Low, 17)
         PulseCode::new(Level::High, 7, Level::Low, 16)
     }
 
-    fn build_packet(&self) -> [u32; BRG_PACKET_SIZE] {
-        let mut data: [u32; BRG_PACKET_SIZE] = [0; BRG_PACKET_SIZE];
+    fn build_packet(&self) -> [PulseCode; BRG_PACKET_SIZE] {
+        let mut data: [PulseCode; BRG_PACKET_SIZE] = [PulseCode::default(); BRG_PACKET_SIZE];
         let mut index: usize = 0;
 
         for byte in &[self.green, self.red, self.blue] {
@@ -140,11 +137,11 @@ impl WS2812B {
     }
 }
 
-pub struct LED {
-    pub inner: WS2812B,
+pub struct LED<'a> {
+    pub inner: WS2812B<'a>,
 }
 
-impl LED {
+impl<'a> LED<'a> {
     pub async fn set_color_rgb(&mut self, r: u8, g: u8, b: u8) -> Result<(), Error> {
         self.inner.set_colors(r, g, b).await
     }

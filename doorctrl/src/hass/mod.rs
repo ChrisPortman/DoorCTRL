@@ -121,7 +121,7 @@ impl<'a> MQTTContext<'a> {
         &mut self,
         sock: T,
         cmd_channel: &Sender<'static, CriticalSectionRawMutex, LockState, 2>,
-        state_sub: &mut Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 6, 0>,
+        state_sub: &mut Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 2, 0>,
     ) -> Result<(), ReasonCode> {
         // subscribe to the lock command topic
         // listen for door state changes
