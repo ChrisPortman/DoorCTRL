@@ -1,5 +1,5 @@
 [workspace]
-members = ["doorctrl", "http"]
+members = ["doorctrl", "http", "conf"]
 resolver = "3"
 
 [profile.dev]

@@ -1,13 +1,17 @@
-use core::str;
+use core::{ops::DerefMut, str};
 
+use conf::{ConfigV1, ConfigV1Update};
 use defmt::{error, info, warn};
 use embassy_futures::select;
 use embassy_net::{tcp::TcpSocket, IpListenEndpoint, Stack};
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, pubsub::Subscriber,
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender, mutex::Mutex, pubsub::Subscriber,
 };
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
+use esp_bootloader_esp_idf::partitions::FlashRegion;
+use esp_hal::system::software_reset;
+use esp_storage::FlashStorage;
 
 use crate::state::{AnyState, DoorState, LockState};
 
@@ -27,6 +31,7 @@ const ERR_ACCEPT_ABORTED: &'static str = "waiting for connection aborted";
 
 const WS_STATE_UPDATE: u8 = 1;
 const WS_CONFIG_UPDATE: u8 = 2;
+const WS_NOTIFICATION: u8 = 3;
 
 // state update payloads
 const WS_LOCK_LOCK: u8 = 1;
@@ -39,14 +44,20 @@ const HTML_404: &'static [u8] = include_bytes!("html/404.html");
 const HTML_400: &'static [u8] = include_bytes!("html/400.html");
 const FAVICON: &'static [u8] = include_bytes!("html/favicon.ico");
 
+type Storage = &'static Mutex<CriticalSectionRawMutex, FlashRegion<'static, FlashStorage<'static>>>;
+
 pub struct HttpService {
+    storage: Storage,
+    config: ConfigV1,
     door_state: Option<DoorState>,
     lock_state: Option<LockState>,
 }
 
 impl HttpService {
-    pub fn new() -> Self {
+    pub fn new(config: ConfigV1, storage: Storage) -> Self {
         Self {
+            storage: storage,
+            config: config,
             door_state: None,
             lock_state: None,
         }
@@ -222,6 +233,21 @@ impl HttpService {
         }
     }
 
+    async fn send_config_via_ws<T: Write>(&self, mut writer: &mut T) {
+        let mut serialized = [0u8; 1024];
+        serialized[0] = WS_CONFIG_UPDATE;
+
+        match serde_json_core::to_slice(&self.config, &mut serialized[1..]) {
+            Ok(mut n) => {
+                n += 1; // account for the leading message type indicator
+                if let Err(e) = WebsocketFrame::send(&mut writer, &mut serialized[..n]).await {
+                    error!("error sending config to web client: {}", e);
+                }
+            }
+            Err(e) => error!("error serializing config to send to web client: {}", e),
+        }
+    }
+
     async fn send_state_via_ws<T: Write>(
         &mut self,
         mut writer: &mut T,
@@ -252,6 +278,23 @@ impl HttpService {
         Ok(())
     }
 
+    async fn send_notification_via_ws<T: Write>(
+        &mut self,
+        mut writer: &mut T,
+        notif: &[u8],
+    ) -> Result<(), &'static str> {
+        if let Err(e) =
+            WebsocketFrame::send(&mut writer, &mut [&[WS_NOTIFICATION], notif].concat()).await
+        {
+            error!("websocket: error writing to socket: {}", e);
+            return Err("error writing to websocket");
+        }
+
+        info!("notification sent to client");
+
+        Ok(())
+    }
+
     pub async fn run_ws<'a, 'b>(
         &mut self,
         sock: &mut TcpSocket<'b>,
@@ -271,6 +314,8 @@ impl HttpService {
             self.send_state_via_ws(&mut writer, AnyState::LockState(lock_state))
                 .await?;
         }
+
+        self.send_config_via_ws(&mut writer).await;
 
         loop {
             info!("websocket: waiting for state update or data from client");
@@ -302,8 +347,46 @@ impl HttpService {
                             _ => warn!("received unknown state update from websocket: {}", buff[0]),
                         },
                         WS_CONFIG_UPDATE => {
-                            // read a u32 size, then that number of bytes
-                            // decode the config and store it, and reboot.
+                            info!("{}", str::from_utf8(&data[1..]).unwrap_or("not urf8"));
+                            match serde_json_core::from_slice::<ConfigV1Update>(&data[1..]) {
+                                Ok((update, _)) => {
+                                    self.config.update(&update);
+                                    info!("config updated");
+                                    info!("device name: {}", self.config.device_name.as_str());
+                                    info!("wifi_ssid: {}", self.config.wifi_ssid.as_str());
+                                    info!("wifi_pass: {}", self.config.wifi_pass.as_str());
+                                    info!("mqtt_host: {}", self.config.mqtt_host.as_str());
+                                    info!("mqtt_user: {}", self.config.mqtt_user.as_str());
+                                    info!("mqtt_pass: {}", self.config.mqtt_pass.as_str());
+
+                                    let mut locked_storage = self.storage.lock().await;
+                                    match self.config.save(locked_storage.deref_mut()) {
+                                        Ok(()) => {
+                                            info!("config saved. rebooting");
+                                            self.send_notification_via_ws(
+                                                &mut writer,
+                                                "Config saved, rebooting...".as_bytes(),
+                                            )
+                                            .await?;
+
+                                            Timer::after(Duration::from_secs(1)).await;
+                                            software_reset();
+                                        }
+                                        Err(e) => {
+                                            error!("failed to save config: {}", e);
+                                            self.send_notification_via_ws(
+                                                &mut writer,
+                                                e.as_bytes(),
+                                            )
+                                            .await?;
+                                        }
+                                    }
+                                    drop(locked_storage);
+                                }
+                                Err(e) => {
+                                    error!("received invalid data: {}", e);
+                                }
+                            }
                         }
                         _ => {
                             error!("websocket: received unknown payload type: {}", buff[0]);

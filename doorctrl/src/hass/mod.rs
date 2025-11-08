@@ -49,6 +49,8 @@ pub fn make_buffers() -> [[u8; BUFFER_LEN]; 2] {
 
 pub struct MQTTContext<'a> {
     device_id: &'a [u8; 12],
+    username: &'a str,
+    password: &'a str,
     discovery_topic: [u8; topic::MQTT_TOPIC_DISCOVERY_LEN],
     availability_topic: [u8; topic::MQTT_TOPIC_AVAILABILITY_LEN],
     lock_cmd_topic: [u8; topic::MQTT_TOPIC_LOCK_COMMAND_LEN],
@@ -57,9 +59,11 @@ pub struct MQTTContext<'a> {
 }
 
 impl<'a> MQTTContext<'a> {
-    pub fn new(device_id: &'a [u8; 12]) -> Self {
+    pub fn new(device_id: &'a [u8; 12], username: &'a str, password: &'a str) -> Self {
         Self {
             device_id: device_id,
+            username: username,
+            password: password,
             discovery_topic: mk_discovery_topic(device_id),
             availability_topic: mk_availability_topic(device_id),
             lock_cmd_topic: mk_lock_cmd_topic(device_id),
@@ -121,7 +125,7 @@ impl<'a> MQTTContext<'a> {
         &mut self,
         sock: T,
         cmd_channel: &Sender<'static, CriticalSectionRawMutex, LockState, 2>,
-        state_sub: &mut Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 2, 0>,
+        state_sub: &mut Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 6, 0>,
     ) -> Result<(), ReasonCode> {
         // subscribe to the lock command topic
         // listen for door state changes
@@ -134,8 +138,8 @@ impl<'a> MQTTContext<'a> {
         );
         config.add_max_subscribe_qos(rust_mqtt::packet::v5::publish_packet::QualityOfService::QoS1);
         config.add_client_id("doorctrl");
-        config.add_username("mqttuser");
-        config.add_password("TF2GVZVfQ-XeiJa-VC6R");
+        config.add_username(self.username);
+        config.add_password(self.password);
         config.add_will(
             str::from_utf8(&self.availability_topic).unwrap(),
             MQTT_PAYLOAD_NOT_AVAILABLE.as_bytes(),
@@ -244,7 +248,6 @@ impl<'a> MQTTContext<'a> {
                     }
                 }
                 select::Either3::Third(_) => {
-                    info!("sending keepalive");
                     if let Err(e) = client.send_ping().await {
                         error!("error sending pingL {}", e);
                         return Err(e);

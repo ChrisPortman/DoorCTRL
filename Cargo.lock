@@ -146,6 +146,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fd1289c04a9ea8cb22300a459a72a385d7c73d3259e2ed7dcb2af674838cfa9"
 
 [[package]]
+name = "conf"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+ "serde",
+ "serde-json-core",
+]
+
+[[package]]
 name = "const-default"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -320,6 +329,7 @@ dependencies = [
 name = "doorctrl"
 version = "0.1.0"
 dependencies = [
+ "conf",
  "critical-section",
  "defmt 1.0.1",
  "embassy-executor",
@@ -1561,6 +1571,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b81787e655bd59cecadc91f7b6b8651330b2be6c33246039a65e5cd6f4e0828"
 dependencies = [
+ "defmt 0.3.100",
  "heapless 0.8.0",
  "ryu",
  "serde",

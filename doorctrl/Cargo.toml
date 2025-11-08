@@ -17,7 +17,8 @@ doctest = false
 bench = false
 
 [dependencies]
-http = {path = "../http/" }
+conf = { path = "../conf" }
+http = { path = "../http/" }
 defmt = {version = "1.0.1", features=["alloc"]}
 
 embedded-nal-async = "0.8.0"
@@ -73,7 +74,7 @@ embassy-time = { version = "0.4.0", features = ["defmt"] }
 rtt-target = { version = "0.6.1", features = ["defmt"] }
 static_cell = "2.1.1"
 serde = { version = "1.0", default-features=false, features=["derive"] }
-serde-json-core = "0.6.0"
+serde-json-core = {version = "0.6", features = ["defmt"] }
 rust-mqtt = {version = "0.3.0", default-features=false, features=["no_std", "defmt"]}
 rand_core = "0.9.3"
 heapless = "0.8.0"

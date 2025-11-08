@@ -22,4 +22,4 @@ target = "riscv32imc-unknown-none-elf"
 build-std = ["core"]
 
 [alias]
-test_pc = "test --target=x86_64-unknown-linux-gnu"
+test_pc = "test --no-fail-fast --target=x86_64-unknown-linux-gnu"

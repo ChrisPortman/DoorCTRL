@@ -8,7 +8,8 @@
 
 use core::{
     net::{IpAddr, Ipv4Addr},
-    str,
+    ops::DerefMut,
+    str::FromStr,
 };
 use defmt::{error, info};
 use embassy_executor::Spawner;
@@ -19,12 +20,13 @@ use embassy_net::{
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Sender},
+    mutex::Mutex,
     pubsub::{PubSubChannel, Subscriber},
 };
 use embassy_time::{Duration, Timer};
 use embedded_nal_async::TcpConnect;
 use esp_alloc as _;
-use esp_bootloader_esp_idf::partitions;
+use esp_bootloader_esp_idf::partitions::{self, FlashRegion, PartitionEntry};
 use esp_hal::clock::{Clock, CpuClock};
 use esp_hal::efuse::Efuse;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
@@ -43,7 +45,7 @@ use esp_radio::{
 use esp_storage::FlashStorage;
 use heapless::Vec;
 
-use doorctrl::conf::ConfigV1;
+use conf::ConfigV1;
 use doorctrl::mk_static;
 
 use doorctrl::ws2812::{LED, WS2812B};
@@ -53,9 +55,9 @@ use doorctrl::{
 };
 use doorctrl::{hass::MQTTContext, web::HttpService};
 
-const SOCKET_NUM: usize = 6;
-const SSID: &str = env!("SSID");
-const PASSWORD: &str = env!("PASSWORD");
+const SOCKET_NUM: usize = 8;
+// const SSID: &str = env!("SSID");
+// const PASSWORD: &str = env!("PASSWORD");
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -93,6 +95,31 @@ fn mac_to_hex(mac: [u8; 6]) -> [u8; 12] {
     hex
 }
 
+type Storage = &'static Mutex<CriticalSectionRawMutex, FlashRegion<'static, FlashStorage<'static>>>;
+
+fn prepare_flash(flash: &'static mut FlashStorage<'static>) -> Storage {
+    let partition_buf = mk_static!(
+        [u8; partitions::PARTITION_TABLE_MAX_LEN],
+        [0u8; partitions::PARTITION_TABLE_MAX_LEN]
+    );
+    let partition_info = partitions::read_partition_table(flash, partition_buf).unwrap();
+    let nvs = mk_static!(
+        PartitionEntry<'static>,
+        partition_info
+            .find_partition(partitions::PartitionType::Data(
+                partitions::DataPartitionSubType::Nvs,
+            ))
+            .unwrap()
+            .unwrap()
+    );
+    let nvs_part = nvs.as_embedded_storage(flash);
+
+    mk_static!(
+        Mutex<CriticalSectionRawMutex, FlashRegion<'_, FlashStorage<'_>>>,
+        Mutex::new(nvs_part)
+    )
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let hal_config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -127,16 +154,8 @@ async fn main(spawner: Spawner) {
     rtt_target::rtt_init_defmt!();
 
     // Flash Memory
-    let mut flash = FlashStorage::new(peripherals.FLASH);
-    let mut partition_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
-    let partition_info = partitions::read_partition_table(&mut flash, &mut partition_buf).unwrap();
-    let nvs = partition_info
-        .find_partition(partitions::PartitionType::Data(
-            partitions::DataPartitionSubType::Nvs,
-        ))
-        .unwrap()
-        .unwrap();
-    let nvs_part = nvs.as_embedded_storage(&mut flash);
+    let flash = mk_static!(FlashStorage, FlashStorage::new(peripherals.FLASH));
+    let storage = prepare_flash(flash);
 
     // Init RGB
     let mhz = CpuClock::_80MHz.frequency().as_mhz();
@@ -168,8 +187,9 @@ async fn main(spawner: Spawner) {
         esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
     let mut wifi_interface = interfaces.sta;
 
-    let config = match ConfigV1::load(nvs_part) {
-        Ok(c) => c,
+    let mut locked_storage = storage.lock().await;
+    let config = match ConfigV1::load(locked_storage.deref_mut()) {
+        Ok(c) => Some(c),
         Err(e) => {
             error!(
                 "error loading config: {:?}. proceding as if unconfigured",
@@ -178,12 +198,15 @@ async fn main(spawner: Spawner) {
             None
         }
     };
+    drop(locked_storage);
 
     let mut net_config = embassy_net::Config::dhcpv4(Default::default());
 
     match config {
-        Some(_) => {
-            spawner.spawn(wifi_client(controller)).ok();
+        Some(c) => {
+            spawner
+                .spawn(wifi_client(controller, c.wifi_ssid, c.wifi_pass))
+                .ok();
         }
         None => {
             spawner.spawn(wifi_ap(controller)).ok();
@@ -210,23 +233,12 @@ async fn main(spawner: Spawner) {
     spawner.spawn(net_task(runner)).ok();
     info!("Network initialized");
 
-    for _ in 0..4 {
-        info!("starting a web server task");
-        if let Err(e) = spawner.spawn(http_server(
-            stack,
-            cmd_channel.sender(),
-            state_pubsub
-                .subscriber()
-                .inspect_err(|e| error!("error subscribing to states for http_service: {}", e))
-                .unwrap(),
-        )) {
-            error!("error spawning web task: {}", e);
-        }
-    }
-
     if let Some(c) = config {
         spawner
             .spawn(mqtt_service(
+                c.mqtt_host,
+                c.mqtt_user,
+                c.mqtt_pass,
                 stack,
                 device_id,
                 cmd_channel.sender(),
@@ -236,6 +248,24 @@ async fn main(spawner: Spawner) {
                     .unwrap(),
             ))
             .ok();
+    }
+
+    let config = config.unwrap_or(ConfigV1::default());
+
+    for _ in 0..4 {
+        info!("starting a web server task");
+        if let Err(e) = spawner.spawn(http_server(
+            config,
+            stack,
+            storage,
+            cmd_channel.sender(),
+            state_pubsub
+                .subscriber()
+                .inspect_err(|e| error!("error subscribing to states for http_service: {}", e))
+                .unwrap(),
+        )) {
+            error!("error spawning web task: {}", e);
+        }
     }
 
     loop {
@@ -272,8 +302,11 @@ async fn wifi_ap(mut controller: WifiController<'static>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn wifi_client(mut controller: WifiController<'static>) -> ! {
-    info!("Device capabilities: {:?}", controller.capabilities());
+async fn wifi_client(
+    mut controller: WifiController<'static>,
+    ssid: conf::ConfigV1Value,
+    pass: conf::ConfigV1Value,
+) -> ! {
     loop {
         match esp_radio::wifi::sta_state() {
             WifiStaState::Connected => {
@@ -286,8 +319,8 @@ async fn wifi_client(mut controller: WifiController<'static>) -> ! {
         if !matches!(controller.is_started(), Ok(true)) {
             let client_config = ModeConfig::Client(
                 ClientConfig::default()
-                    .with_ssid(SSID.into())
-                    .with_password(PASSWORD.into()),
+                    .with_ssid(ssid.as_str().into())
+                    .with_password(pass.as_str().into()),
             );
 
             if let Err(e) = controller.set_config(&client_config) {
@@ -319,12 +352,26 @@ async fn wifi_client(mut controller: WifiController<'static>) -> ! {
 
 #[embassy_executor::task]
 async fn mqtt_service(
+    mqtt_host: conf::ConfigV1Value,
+    mqtt_user: conf::ConfigV1Value,
+    mqtt_pass: conf::ConfigV1Value,
     stack: Stack<'static>,
     device_id: &'static [u8; 12],
     cmd_channel: Sender<'static, CriticalSectionRawMutex, LockState, 2>,
     mut state_sub: Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 6, 0>,
 ) -> ! {
-    let mut context = MQTTContext::new(device_id);
+    let mut context = MQTTContext::new(device_id, mqtt_user.as_str(), mqtt_pass.as_str());
+
+    let mqtt_ipaddr = match Ipv4Addr::from_str(mqtt_host.as_str()) {
+        Ok(i) => i,
+        Err(_) => {
+            loop {
+                // Never progress...
+                error!("mqtt host is not a valid IP address");
+                Timer::after(Duration::from_secs(3600)).await;
+            }
+        }
+    };
 
     loop {
         stack.wait_link_up().await;
@@ -337,11 +384,9 @@ async fn mqtt_service(
 
         let state = TcpClientState::<3, 1024, 1024>::new();
         let sock = TcpClient::new(stack, &state);
+        info!("MQTT: connecting to {}", mqtt_ipaddr);
         let conn = match sock
-            .connect(core::net::SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(172, 21, 0, 15)),
-                1883,
-            ))
+            .connect(core::net::SocketAddr::new(IpAddr::V4(mqtt_ipaddr), 1883))
             .await
         {
             Ok(c) => c,
@@ -362,7 +407,9 @@ async fn mqtt_service(
 }
 #[embassy_executor::task(pool_size = 4)]
 async fn http_server(
+    config: ConfigV1,
     stack: Stack<'static>,
+    storage: Storage,
     cmd_channel: Sender<'static, CriticalSectionRawMutex, LockState, 2>,
     mut state_sub: Subscriber<'static, CriticalSectionRawMutex, AnyState, 2, 6, 0>,
 ) -> ! {
@@ -370,7 +417,7 @@ async fn http_server(
         stack.wait_link_up().await;
         stack.wait_config_up().await;
 
-        let mut service = HttpService::new();
+        let mut service = HttpService::new(config, storage);
         if let Err(e) = service.run(stack, &cmd_channel, &mut state_sub).await {
             error!(
                 "web server returned an error. Will restart in 5 secs: {}",

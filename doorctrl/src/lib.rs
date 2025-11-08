@@ -1,5 +1,4 @@
 #![no_std]
-pub mod conf;
 pub mod door;
 pub mod hass;
 pub mod state;
