@@ -1,10 +1,8 @@
-use core::usize;
-
 use base64ct::{Base64, Encoding};
 use embedded_io_async::{Read, Write};
 use sha1::{Digest, Sha1};
 
-const SEC_WEBSOCKET_ACCEPT_MAGIC: &'static str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const SEC_WEBSOCKET_ACCEPT_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn sec_websocket_accept_val(key: &str) -> Result<[u8; 28], &'static str> {
     let mut key_hasher = Sha1::new();
@@ -13,7 +11,7 @@ pub fn sec_websocket_accept_val(key: &str) -> Result<[u8; 28], &'static str> {
     let key_hash = key_hasher.finalize();
 
     let mut key_b64_buff = [0u8; 28];
-    if let Err(_) = Base64::encode(&key_hash, &mut key_b64_buff) {
+    if Base64::encode(&key_hash, &mut key_b64_buff).is_err() {
         return Err("error enoding key hash due to invalid length");
     }
 
@@ -34,36 +32,34 @@ pub enum WebsocketError {
 //    header. decode_header again with the additional bytes to recieve a header struct
 // 2. read header.len bytes from the socket to receve the payload.
 
-#[derive(defmt::Format, Debug)]
-pub struct WebsocketFrame {
-    pub opcode: u8,
-    pub len: usize,
-    fin: bool,
-    masked: bool,
-    mask: Option<[u8; 4]>,
+pub struct Websocket<'a, C: Read + Write> {
+    conn: &'a mut C,
 }
 
-impl WebsocketFrame {
-    pub async fn receive<T: Read>(
-        src: &mut T,
-        payload_buf: &mut [u8],
-    ) -> Result<Self, WebsocketError> {
+impl<'a, C: Read + Write> Websocket<'a, C> {
+    pub fn new(conn: &'a mut C) -> Self {
+        Self { conn }
+    }
+
+    pub async fn receive(&mut self, buf: &mut [u8]) -> Result<WebsocketFrame, WebsocketError> {
         let mut offset = 0;
         let mut header_buf = [0u8; 14];
 
-        src.read_exact(&mut header_buf[..6])
+        self.conn
+            .read_exact(&mut header_buf[..6])
             .await
-            .or_else(|_| Err(WebsocketError::NetworkError))?;
+            .map_err(|_| WebsocketError::NetworkError)?;
         offset += 6;
 
         let header: WebsocketFrame;
         loop {
-            header = match Self::decode(&header_buf[..offset]) {
+            header = match WebsocketFrame::decode(&header_buf[..offset]) {
                 Ok(h) => h,
                 Err(WebsocketError::InsufficientData(n)) => {
-                    src.read_exact(&mut header_buf[offset..offset + n])
+                    self.conn
+                        .read_exact(&mut header_buf[offset..offset + n])
                         .await
-                        .or_else(|_| Err(WebsocketError::NetworkError))?;
+                        .map_err(|_| WebsocketError::NetworkError)?;
                     offset += n;
                     continue;
                 }
@@ -74,25 +70,26 @@ impl WebsocketFrame {
             break;
         }
 
-        if header.len > payload_buf.len() {
+        if header.len > buf.len() {
             return Err(WebsocketError::Unsupported(
                 "payload length exceeds buffer size",
             ));
         }
 
-        src.read_exact(&mut payload_buf[..header.len])
+        self.conn
+            .read_exact(&mut buf[..header.len])
             .await
-            .or_else(|_| Err(WebsocketError::NetworkError))?;
+            .map_err(|_| WebsocketError::NetworkError)?;
 
         if header.masked {
-            header.apply_mask(&mut payload_buf[..header.len]);
+            header.apply_mask(&mut buf[..header.len]);
         }
 
         Ok(header)
     }
 
-    pub async fn send<T: Write>(dest: &mut T, data: &mut [u8]) -> Result<(), WebsocketError> {
-        let header = Self {
+    pub async fn send(&mut self, data: &mut [u8]) -> Result<(), WebsocketError> {
+        let header = WebsocketFrame {
             fin: true,
             opcode: 2,
             masked: false,
@@ -103,17 +100,30 @@ impl WebsocketFrame {
         let mut encoded_header = [0u8; 14];
         let header_len = header.encode(&mut encoded_header)?;
 
-        dest.write_all(&encoded_header[..header_len])
+        self.conn
+            .write_all(&encoded_header[..header_len])
             .await
-            .or_else(|_| Err(WebsocketError::NetworkError))?;
+            .map_err(|_| WebsocketError::NetworkError)?;
 
-        dest.write_all(data)
+        self.conn
+            .write_all(data)
             .await
-            .or_else(|_| Err(WebsocketError::NetworkError))?;
+            .map_err(|_| WebsocketError::NetworkError)?;
 
         Ok(())
     }
+}
 
+#[derive(defmt::Format, Debug)]
+pub struct WebsocketFrame {
+    pub opcode: u8,
+    pub len: usize,
+    fin: bool,
+    masked: bool,
+    mask: Option<[u8; 4]>,
+}
+
+impl WebsocketFrame {
     pub fn decode(value: &[u8]) -> Result<Self, WebsocketError> {
         let mut required_bytes = 2usize;
 
@@ -123,7 +133,7 @@ impl WebsocketFrame {
             ));
         }
 
-        let fin: bool = if (value[0] & 128) == 128 { true } else { false };
+        let fin: bool = (value[0] & 128) == 128;
         let opcode: u8 = value[0] & 0x0F;
 
         if !fin || opcode == 0 {
@@ -132,7 +142,7 @@ impl WebsocketFrame {
             ));
         }
 
-        let masked: bool = if (value[1] & 128) == 128 { true } else { false };
+        let masked: bool = (value[1] & 128) == 128;
 
         let mut len: u64 = (value[1] << 1 >> 1) as u64;
         let mut mask_offset = 2;
@@ -189,11 +199,11 @@ impl WebsocketFrame {
         }
 
         Ok(WebsocketFrame {
-            fin: fin,
-            opcode: opcode,
-            masked: masked,
-            len: len,
-            mask: mask,
+            fin,
+            opcode,
+            masked,
+            len,
+            mask,
         })
     }
 
@@ -271,7 +281,7 @@ impl WebsocketFrame {
     fn apply_mask(&self, data: &mut [u8]) {
         if let Some(mask) = self.mask {
             for i in 0..self.len {
-                data[i] = data[i] ^ mask[i % 4];
+                data[i] ^= mask[i % 4];
             }
         }
     }

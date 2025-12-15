@@ -3,11 +3,6 @@ runner = "probe-rs run --chip=esp32c3 --preverify --always-print-stacktrace --no
 
 [env]
 DEFMT_LOG="info"
-SSID = "4luciduspl"
-PASSWORD = "4luc1du5pl"
-DEVICE_NAME = "Front Door 2"
-LOCK_ID= "front_door2_lock"
-SENSOR_ID= "front_door2_sensor"
 
 [build]
 rustflags = [

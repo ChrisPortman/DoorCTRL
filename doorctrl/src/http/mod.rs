@@ -1,9 +1,8 @@
-#![no_std]
-
 mod ascii;
 pub mod header;
 pub mod request;
 pub mod response;
+pub mod server;
 pub mod websocket;
 
 use embedded_io_async::Write;
@@ -15,8 +14,10 @@ pub(crate) trait HttpWrite {
 #[derive(Debug, defmt::Format, PartialEq)]
 pub enum HTTPError {
     Incomplete,
+    Disconnected,
     ProtocolError(&'static str),
     NetworkError(&'static str),
     UnsupportedRequest(&'static str),
     ExtraHeadersExceeded,
+    WebsocketProtocolError,
 }

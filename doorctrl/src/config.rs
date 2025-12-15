@@ -1,6 +1,4 @@
-#![no_std]
-
-use core::{fmt, u32};
+use core::fmt;
 use embedded_storage::{nor_flash::NorFlash, nor_flash::ReadNorFlash};
 use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
@@ -9,7 +7,7 @@ const CONFIGV1_MAGIC: [u8; 13] = [
     b'd', b'o', b'o', b'r', b'c', b'o', b'n', b't', b'r', b'o', b'l', b'v', b'1',
 ];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConfigV1Value([u8; 64]);
 
 impl ConfigV1Value {
@@ -35,7 +33,7 @@ impl TryFrom<&str> for ConfigV1Value {
             return Err("input string too long (>64 bytes)");
         }
 
-        ret.0[..data.len()].copy_from_slice(&data);
+        ret.0[..data.len()].copy_from_slice(data);
 
         Ok(ret)
     }
@@ -118,6 +116,9 @@ pub struct ConfigV1 {
     #[serde(skip_serializing)]
     pub wifi_pass: ConfigV1Value,
     pub mqtt_host: ConfigV1Value,
+    pub mqtt_port: u16,
+    pub mqtt_tls: bool,
+    pub mqtt_tls_verify_cert: bool,
     pub mqtt_user: ConfigV1Value,
     #[serde(skip_serializing)]
     pub mqtt_pass: ConfigV1Value,
@@ -136,6 +137,9 @@ impl Default for ConfigV1 {
             wifi_ssid: ConfigV1Value::default(),
             wifi_pass: ConfigV1Value::default(),
             mqtt_host: ConfigV1Value::default(),
+            mqtt_port: 1883,
+            mqtt_tls: false,
+            mqtt_tls_verify_cert: true,
             mqtt_user: ConfigV1Value::default(),
             mqtt_pass: ConfigV1Value::default(),
             post_magic: magic,
@@ -145,42 +149,126 @@ impl Default for ConfigV1 {
 
 impl ConfigV1 {
     pub fn update(&mut self, update: &ConfigV1Update) {
-        if let Some(value) = update.device_name {
-            if value.0[0] != 0 {
-                self.device_name = value;
-            }
+        if let Some(value) = update.device_name
+            && value.0[0] != 0
+        {
+            self.device_name = value;
         }
-        if let Some(value) = update.wifi_ssid {
-            if value.0[0] != 0 {
-                self.wifi_ssid = value
-            }
+
+        if let Some(value) = update.wifi_ssid
+            && value.0[0] != 0
+        {
+            self.wifi_ssid = value
         }
-        if let Some(value) = update.wifi_pass {
-            if value.0[0] != 0 {
-                self.wifi_pass = value;
-            }
+
+        if let Some(value) = update.wifi_pass
+            && value.0[0] != 0
+        {
+            self.wifi_pass = value;
         }
-        if let Some(value) = update.mqtt_host {
-            if value.0[0] != 0 {
-                self.mqtt_host = value;
-            }
+
+        if let Some(value) = update.mqtt_host
+            && value.0[0] != 0
+        {
+            self.mqtt_host = value;
         }
-        if let Some(value) = update.mqtt_user {
-            if value.0[0] != 0 {
-                self.mqtt_user = value;
-            }
+
+        if let Some(value) = update.mqtt_port
+            && value != 0
+        {
+            self.mqtt_port = value;
         }
-        if let Some(value) = update.mqtt_pass {
-            if value.0[0] != 0 {
-                self.mqtt_pass = value;
-            }
+
+        if let Some(value) = update.mqtt_tls {
+            self.mqtt_tls = value;
+        }
+
+        if let Some(value) = update.mqtt_user
+            && value.0[0] != 0
+        {
+            self.mqtt_user = value;
+        }
+
+        if let Some(value) = update.mqtt_pass
+            && value.0[0] != 0
+        {
+            self.mqtt_pass = value;
         }
     }
 
     pub fn load<S: ReadNorFlash>(src: &mut S) -> Result<Self, &'static str> {
         let mut read_buf = [0u8; size_of::<ConfigV1>()];
-        if let Err(_) = src.read(0, &mut read_buf[..]) {
+        if src.read(0, &mut read_buf[..]).is_err() {
             return Err("error reading config from storage");
+        }
+
+        Self::decode(&read_buf)
+    }
+
+    pub fn save<S: NorFlash>(&self, mut dst: S) -> Result<(), &'static str> {
+        if !self.complete() {
+            return Err("config not complete");
+        }
+
+        let mut write_buf = [0u8; size_of::<ConfigV1>()];
+        self.encode(&mut write_buf).unwrap();
+
+        let erase_len: u32 = 4096;
+        if dst.erase(0, erase_len).is_err() {
+            return Err("error erasing flash prior to write");
+        }
+        if dst.write(0, &write_buf).is_err() {
+            return Err("error writing to storage");
+        }
+
+        Ok(())
+    }
+
+    fn encode(&self, buf: &mut [u8]) -> Result<(), &'static str> {
+        if buf.len() < size_of::<ConfigV1>() {
+            return Err("buffer to small to store config");
+        }
+
+        let mut offset = 0;
+
+        buf[offset..offset + 64].copy_from_slice(&self.pre_magic.0);
+        offset += 64;
+
+        buf[offset..offset + 64].copy_from_slice(&self.device_name.0);
+        offset += 64;
+
+        buf[offset..offset + 64].copy_from_slice(&self.wifi_ssid.0);
+        offset += 64;
+
+        buf[offset..offset + 64].copy_from_slice(&self.wifi_pass.0);
+        offset += 64;
+
+        buf[offset..offset + 64].copy_from_slice(&self.mqtt_host.0);
+        offset += 64;
+
+        buf[offset..offset + size_of_val(&self.mqtt_port)]
+            .copy_from_slice(&self.mqtt_port.to_be_bytes());
+        offset += size_of_val(&self.mqtt_port);
+
+        buf[offset] = self.mqtt_tls as u8;
+        offset += 1;
+
+        buf[offset] = self.mqtt_tls_verify_cert as u8;
+        offset += 1;
+
+        buf[offset..offset + 64].copy_from_slice(&self.mqtt_user.0);
+        offset += 64;
+
+        buf[offset..offset + 64].copy_from_slice(&self.mqtt_pass.0);
+        offset += 64;
+
+        buf[offset..offset + 64].copy_from_slice(&self.post_magic.0);
+        Ok(())
+    }
+
+    fn decode(buf: &[u8]) -> Result<Self, &'static str> {
+        if buf.len() < size_of::<ConfigV1>() {
+            return Err("buffer to small to contain config");
         }
 
         let mut config = ConfigV1::default();
@@ -189,42 +277,53 @@ impl ConfigV1 {
         config
             .pre_magic
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
         config
             .device_name
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
         config
             .wifi_ssid
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
         config
             .wifi_pass
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
         config
             .mqtt_host
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
+
+        config.mqtt_port =
+            u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(&buf[offset..offset + 2]).unwrap());
+        offset += size_of_val(&config.mqtt_port);
+
+        config.mqtt_tls = buf[offset] == 1;
+        offset += 1;
+
+        config.mqtt_tls_verify_cert = buf[offset] == 1;
+        offset += 1;
+
         config
             .mqtt_user
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
         config
             .mqtt_pass
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
         offset += 64;
         config
             .post_magic
             .0
-            .copy_from_slice(&read_buf[offset..offset + 64]);
+            .copy_from_slice(&buf[offset..offset + 64]);
 
         if config.pre_magic.0[..CONFIGV1_MAGIC.len()] != CONFIGV1_MAGIC[..] {
             return Err("no config exists or config corrupt");
@@ -235,48 +334,6 @@ impl ConfigV1 {
         }
 
         Ok(config)
-    }
-
-    pub fn save<S: NorFlash>(&self, mut dst: S) -> Result<(), &'static str> {
-        if !self.complete() {
-            return Err("config not complete");
-        }
-
-        let mut write_buf = [0u8; size_of::<ConfigV1>()];
-        let mut offset = 0;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.pre_magic.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.device_name.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.wifi_ssid.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.wifi_pass.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.mqtt_host.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.mqtt_user.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.mqtt_pass.0);
-        offset += 64;
-
-        write_buf[offset..offset + 64].copy_from_slice(&self.post_magic.0);
-
-        let erase_len: u32 = 4096;
-        if let Err(_) = dst.erase(0, erase_len) {
-            return Err("error erasing flash prior to write");
-        }
-        if let Err(_) = dst.write(0, &write_buf) {
-            return Err("error writing to storage");
-        }
-
-        Ok(())
     }
 
     fn complete(&self) -> bool {
@@ -295,6 +352,9 @@ impl ConfigV1 {
         if self.mqtt_pass.0[0] == 0u8 {
             return false;
         }
+        if self.mqtt_port == 0 {
+            return false;
+        }
 
         true
     }
@@ -306,6 +366,8 @@ pub struct ConfigV1Update {
     wifi_ssid: Option<ConfigV1Value>,
     wifi_pass: Option<ConfigV1Value>,
     mqtt_host: Option<ConfigV1Value>,
+    mqtt_port: Option<u16>,
+    mqtt_tls: Option<bool>,
     mqtt_user: Option<ConfigV1Value>,
     mqtt_pass: Option<ConfigV1Value>,
 }
@@ -313,6 +375,8 @@ pub struct ConfigV1Update {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use hex::{decode, encode};
+
     use serde_json_core::{from_str, to_slice};
 
     use super::*;
@@ -367,8 +431,50 @@ mod tests {
         let mut serialized = [0u8; 1024];
 
         match to_slice(&config, &mut serialized[..]) {
-            Ok(n) => assert_eq!(str::from_utf8(&serialized[..n]).unwrap_or("not_utf8"), ""),
+            Ok(n) => assert_eq!(
+                str::from_utf8(&serialized[..n]).unwrap_or("not_utf8"),
+                "{\"device_name\":\"mydevice\",\"wifi_ssid\":\"\",\"mqtt_host\":\"\",\"mqtt_port\":1883,\"mqtt_tls\":false,\"mqtt_tls_verify_cert\":true,\"mqtt_user\":\"\"}",
+            ),
             Err(e) => assert!(false, "serialization returned error: {}", e),
         }
+    }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let mut config = ConfigV1::default();
+        config.device_name = "aaaaaa".try_into().unwrap();
+        config.mqtt_port = 1024;
+        config.mqtt_tls = true;
+        config.mqtt_tls_verify_cert = false;
+
+        let mut outbuf = [0u8; size_of::<ConfigV1>()];
+        if let Err(e) = config.encode(&mut outbuf) {
+            panic!("{}", e);
+        }
+
+        let outhex = encode(&outbuf);
+
+        assert_eq!(
+            outhex,
+            "646f6f72636f6e74726f6c7631000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             61616161616100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             0400\
+             01\
+             00\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             646f6f72636f6e74726f6c7631000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        );
+
+        let inbuf = decode(outhex).expect("invalid hex decode input");
+        let in_config = ConfigV1::decode(inbuf.as_slice()).expect("ConfigV1::from_bytes failed");
+
+        assert_eq!(in_config.device_name, config.device_name);
+        assert_eq!(in_config.mqtt_port, config.mqtt_port);
+        assert_eq!(in_config.mqtt_tls, config.mqtt_tls);
+        assert_eq!(in_config.mqtt_tls_verify_cert, config.mqtt_tls_verify_cert);
     }
 }

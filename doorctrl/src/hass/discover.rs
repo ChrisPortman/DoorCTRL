@@ -1,8 +1,8 @@
 use serde::Serialize;
 
-const DEVICE_NAME: &str = env!("DEVICE_NAME");
-const LOCK_ID: &str = env!("LOCK_ID");
-const SENSOR_ID: &str = env!("SENSOR_ID");
+const DEFAULT_DEVICE_NAME: &str = "Door";
+const DEFAULT_LOCK_ID: &str = "door_lock";
+const DEFAULT_SENSOR_ID: &str = "door_sensor";
 
 const MQTT_PAYLOAD_AVAILABLE: &str = "online";
 const MQTT_PAYLOAD_NOT_AVAILABLE: &str = "offline";
@@ -22,16 +22,16 @@ const MQTT_ORIGIN_SW_VERSION: &str = "0.0.1";
 const MQTT_ORIGIN_SUPPORT_URL: &str = "https://github.com/chrisportman/doorctl";
 
 #[derive(Serialize)]
-struct DiscoveryDevice {
-    identifiers: &'static str,
-    name: &'static str,
+struct DiscoveryDevice<'a> {
+    identifiers: &'a str,
+    name: &'a str,
 }
 
-impl Default for DiscoveryDevice {
+impl<'a> Default for DiscoveryDevice<'a> {
     fn default() -> Self {
         Self {
-            identifiers: DEVICE_NAME,
-            name: DEVICE_NAME,
+            identifiers: DEFAULT_DEVICE_NAME,
+            name: DEFAULT_DEVICE_NAME,
         }
     }
 }
@@ -55,7 +55,8 @@ impl Default for DiscoveryOrigin {
 
 #[derive(Serialize)]
 struct ComponentLock<'a> {
-    unique_id: &'static str,
+    unique_id: &'a str,
+    object_id: &'a str,
     platform: &'static str,
     name: &'static str,
     enabled_by_default: bool,
@@ -72,7 +73,8 @@ struct ComponentLock<'a> {
 impl<'a> Default for ComponentLock<'a> {
     fn default() -> Self {
         Self {
-            unique_id: LOCK_ID,
+            unique_id: DEFAULT_LOCK_ID,
+            object_id: DEFAULT_LOCK_ID,
             platform: MQTT_PLATFORM_LOCK,
             name: "Lock",
             enabled_by_default: true,
@@ -90,7 +92,8 @@ impl<'a> Default for ComponentLock<'a> {
 
 #[derive(Serialize)]
 struct ComponentBinarySensor<'a> {
-    unique_id: &'static str,
+    unique_id: &'a str,
+    object_id: &'a str,
     device_class: &'static str,
     name: &'static str,
     platform: &'static str,
@@ -105,7 +108,8 @@ struct ComponentBinarySensor<'a> {
 impl<'a> Default for ComponentBinarySensor<'a> {
     fn default() -> Self {
         Self {
-            unique_id: SENSOR_ID,
+            unique_id: DEFAULT_SENSOR_ID,
+            object_id: DEFAULT_SENSOR_ID,
             device_class: MQTT_DEVICE_CLASS_BINARY_SENSOR,
             name: "Door",
             platform: MQTT_PLATFORM_BINARY_SENSOR,
@@ -127,7 +131,7 @@ struct DiscoveryComponents<'a> {
 
 #[derive(Serialize, Default)]
 pub(crate) struct Discovery<'a> {
-    device: DiscoveryDevice,
+    device: DiscoveryDevice<'a>,
     origin: DiscoveryOrigin,
     components: DiscoveryComponents<'a>,
     availability_topic: &'a str,
@@ -137,16 +141,26 @@ pub(crate) struct Discovery<'a> {
 
 impl<'a> Discovery<'a> {
     pub(crate) fn new(
+        device_name: &'a str,
+        device_id: &'a str,
+        lock_id: &'a str,
+        sensor_id: &'a str,
         avail_topic: &'a str,
         lock_state_topic: &'a str,
         lock_cmd_topic: &'a str,
         reed_state_topic: &'a str,
     ) -> Self {
         let mut disc = Discovery::default();
+        disc.device.identifiers = device_id;
+        disc.device.name = device_name;
         disc.availability_topic = avail_topic;
         disc.availability_mode = MQTT_AVAILABILITY_MODE;
+        disc.components.lock.unique_id = lock_id;
+        disc.components.lock.object_id = lock_id;
         disc.components.lock.state_topic = lock_state_topic;
         disc.components.lock.command_topic = lock_cmd_topic;
+        disc.components.reed.unique_id = sensor_id;
+        disc.components.reed.object_id = sensor_id;
         disc.components.reed.state_topic = reed_state_topic;
         disc
     }

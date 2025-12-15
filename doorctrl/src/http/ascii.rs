@@ -28,7 +28,7 @@ pub(crate) fn atoi(data: &[u8]) -> Option<u32> {
         val += digit_val * 10_u32.pow(exp);
     }
 
-    return Some(val);
+    Some(val)
 }
 
 pub(crate) struct AsciiInt([u8; 20]);

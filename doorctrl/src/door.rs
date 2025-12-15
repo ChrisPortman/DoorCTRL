@@ -34,10 +34,10 @@ where
         state_channel: ImmediatePublisher<'a, M, AnyState, 2, 6, 0>,
     ) -> Self {
         Self {
-            lock_pin: lock_pin,
-            reed_pin: reed_pin,
-            cmd_channel: cmd_channel,
-            state_channel: state_channel,
+            lock_pin,
+            reed_pin,
+            cmd_channel,
+            state_channel,
             last_reed_state: PinState::Low,
         }
     }

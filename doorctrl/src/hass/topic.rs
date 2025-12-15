@@ -26,9 +26,9 @@ pub(super) fn mk_availability_topic(device_id: &[u8; 12]) -> [u8; MQTT_TOPIC_AVA
     let device_id_offset: usize = TOPIC_PREFIX.len();
     let suffix_offset: usize = device_id_offset + device_id.len();
 
-    topic[prefix_offset..device_id_offset].copy_from_slice(&TOPIC_PREFIX.as_bytes());
+    topic[prefix_offset..device_id_offset].copy_from_slice(TOPIC_PREFIX.as_bytes());
     topic[device_id_offset..suffix_offset].copy_from_slice(device_id);
-    topic[suffix_offset..].copy_from_slice(&SUFFIX.as_bytes());
+    topic[suffix_offset..].copy_from_slice(SUFFIX.as_bytes());
     topic
 }
 
@@ -41,9 +41,9 @@ pub(super) fn mk_lock_cmd_topic(device_id: &[u8; 12]) -> [u8; MQTT_TOPIC_LOCK_CO
     let device_id_offset: usize = TOPIC_PREFIX.len();
     let suffix_offset: usize = device_id_offset + device_id.len();
 
-    topic[prefix_offset..device_id_offset].copy_from_slice(&TOPIC_PREFIX.as_bytes());
+    topic[prefix_offset..device_id_offset].copy_from_slice(TOPIC_PREFIX.as_bytes());
     topic[device_id_offset..suffix_offset].copy_from_slice(device_id);
-    topic[suffix_offset..].copy_from_slice(&SUFFIX.as_bytes());
+    topic[suffix_offset..].copy_from_slice(SUFFIX.as_bytes());
     topic
 }
 
@@ -55,9 +55,9 @@ pub(super) fn mk_lock_state_topic(device_id: &[u8; 12]) -> [u8; MQTT_TOPIC_LOCK_
     let device_id_offset: usize = TOPIC_PREFIX.len();
     let suffix_offset: usize = device_id_offset + device_id.len();
 
-    topic[prefix_offset..device_id_offset].copy_from_slice(&TOPIC_PREFIX.as_bytes());
+    topic[prefix_offset..device_id_offset].copy_from_slice(TOPIC_PREFIX.as_bytes());
     topic[device_id_offset..suffix_offset].copy_from_slice(device_id);
-    topic[suffix_offset..].copy_from_slice(&SUFFIX.as_bytes());
+    topic[suffix_offset..].copy_from_slice(SUFFIX.as_bytes());
     topic
 }
 
@@ -69,9 +69,9 @@ pub(super) fn mk_sensor_state_topic(device_id: &[u8; 12]) -> [u8; MQTT_TOPIC_SEN
     let device_id_offset: usize = TOPIC_PREFIX.len();
     let suffix_offset: usize = device_id_offset + device_id.len();
 
-    topic[prefix_offset..device_id_offset].copy_from_slice(&TOPIC_PREFIX.as_bytes());
+    topic[prefix_offset..device_id_offset].copy_from_slice(TOPIC_PREFIX.as_bytes());
     topic[device_id_offset..suffix_offset].copy_from_slice(device_id);
-    topic[suffix_offset..].copy_from_slice(&SUFFIX.as_bytes());
+    topic[suffix_offset..].copy_from_slice(SUFFIX.as_bytes());
     topic
 }
 
@@ -83,8 +83,8 @@ pub(super) fn mk_discovery_topic(device_id: &[u8; 12]) -> [u8; MQTT_TOPIC_DISCOV
     let device_id_offset: usize = MQTT_TOPIC_DISCOVERY_PREFIX.len();
     let suffix_offset: usize = device_id_offset + device_id.len();
 
-    topic[prefix_offset..device_id_offset].copy_from_slice(&MQTT_TOPIC_DISCOVERY_PREFIX.as_bytes());
+    topic[prefix_offset..device_id_offset].copy_from_slice(MQTT_TOPIC_DISCOVERY_PREFIX.as_bytes());
     topic[device_id_offset..suffix_offset].copy_from_slice(device_id);
-    topic[suffix_offset..].copy_from_slice(&MQTT_TOPIC_DISCOVERY_SUFFIX.as_bytes());
+    topic[suffix_offset..].copy_from_slice(MQTT_TOPIC_DISCOVERY_SUFFIX.as_bytes());
     topic
 }

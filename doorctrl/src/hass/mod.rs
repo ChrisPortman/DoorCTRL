@@ -23,6 +23,7 @@ use rust_mqtt::{
 use serde_json_core::to_slice;
 
 use crate::state::{AnyState, DoorState, LockState};
+
 use discover::Discovery;
 use topic::{
     mk_availability_topic, mk_discovery_topic, mk_lock_cmd_topic, mk_lock_state_topic,
@@ -37,6 +38,8 @@ const MQTT_STATE_LOCKED: &str = "LOCKED";
 const MQTT_STATE_UNLOCKED: &str = "UNLOCKED";
 const MQTT_STATE_OFF: &str = "OFF";
 const MQTT_STATE_ON: &str = "ON";
+const MQTT_LOCK_ID_SUFFIX: &str = "_lock";
+const MQTT_SENSOR_ID_SUFFIX: &str = "_sensor";
 
 const BUFFER_LEN: usize = 1024;
 const MQTT_KEEPALIVE: u64 = 60;
@@ -49,6 +52,7 @@ pub fn make_buffers() -> [[u8; BUFFER_LEN]; 2] {
 
 pub struct MQTTContext<'a> {
     device_id: &'a [u8; 12],
+    device_name: &'a str,
     username: &'a str,
     password: &'a str,
     discovery_topic: [u8; topic::MQTT_TOPIC_DISCOVERY_LEN],
@@ -59,11 +63,17 @@ pub struct MQTTContext<'a> {
 }
 
 impl<'a> MQTTContext<'a> {
-    pub fn new(device_id: &'a [u8; 12], username: &'a str, password: &'a str) -> Self {
+    pub fn new(
+        device_id: &'a [u8; 12],
+        device_name: &'a str,
+        username: &'a str,
+        password: &'a str,
+    ) -> Self {
         Self {
-            device_id: device_id,
-            username: username,
-            password: password,
+            device_id,
+            device_name,
+            username,
+            password,
             discovery_topic: mk_discovery_topic(device_id),
             availability_topic: mk_availability_topic(device_id),
             lock_cmd_topic: mk_lock_cmd_topic(device_id),
@@ -78,7 +88,19 @@ impl<'a> MQTTContext<'a> {
     ) -> Result<(), ReasonCode> {
         client.connect_to_broker().await?;
 
+        let mut lock_id: [u8; 17] = [0u8; 17];
+        lock_id[..12].copy_from_slice(self.device_id);
+        lock_id[12..].copy_from_slice(MQTT_LOCK_ID_SUFFIX.as_bytes());
+
+        let mut sensor_id: [u8; 19] = [0u8; 19];
+        sensor_id[..12].copy_from_slice(self.device_id);
+        sensor_id[12..].copy_from_slice(MQTT_SENSOR_ID_SUFFIX.as_bytes());
+
         let discovery_payload = Discovery::new(
+            self.device_name,
+            str::from_utf8(self.device_id).unwrap(),
+            str::from_utf8(&lock_id).unwrap(),
+            str::from_utf8(&sensor_id).unwrap(),
             str::from_utf8(&self.availability_topic).unwrap(),
             str::from_utf8(&self.lock_state_topic).unwrap(),
             str::from_utf8(&self.lock_cmd_topic).unwrap(),

@@ -206,9 +206,17 @@
             border-width: 2px;
             padding: 1px 5px;
             height: 24px;
-            width: 100%;
             border-radius: 5px;
             font-size: 1em;
+        }
+
+        .form-checkbox-field {
+            display: flex;
+        }
+
+        .form-checkbox-field>label {
+            display: flex;
+            align-items: center;
         }
 
         input:focus-visible,
@@ -309,26 +317,47 @@
             <!-- Config side bar -->
             <div id="config-panel" class="closed">
                 <div id="config-panel-form" class="closed">
+
                     <fieldset>
                         <legend>General</legend>
-                        <label for="device_name">Device Name</label>
-                        <input type="text" id="device_name" name="device_name" oninput="updateConfigField(this)"><br>
+                        <div>
+                            <label for="device_name">Device Name</label>
+                            <input type="text" id="device_name" name="device_name" oninput="updateConfigField(this)">
+                        </div>
                     </fieldset>
                     <fieldset>
                         <legend>Wifi</legend>
-                        <label for="wifi_ssid">WiFi Network</label>
-                        <input type="text" id="wifi_ssid" name="wifi_ssid" oninput="updateConfigField(this)"><br>
-                        <label for="wifi_pass">WiFi Password:</label>
-                        <input type="password" id="wifi_pass" name="wifi_pass" oninput="updateConfigField(this)"><br>
+                        <div>
+                            <label for="wifi_ssid">Network</label>
+                            <input type="text" id="wifi_ssid" name="wifi_ssid" oninput="updateConfigField(this)">
+                        </div>
+                        <div>
+                            <label for="wifi_pass">Password</label>
+                            <input type="password" id="wifi_pass" name="wifi_pass" oninput="updateConfigField(this)">
+                        </div>
                     </fieldset>
                     <fieldset>
                         <legend>MQTT</legend>
-                        <label for="mqtt_host">MQTT Host</label>
-                        <input type="text" id="mqtt_host" name="mqtt_host" oninput="updateConfigField(this)"><br>
-                        <label for="mqtt_user">MQTT Username</label>
-                        <input type="text" id="mqtt_user" name="mqtt_user" oninput="updateConfigField(this)"><br>
-                        <label for="mqtt_pass">MQTT Password:</label>
-                        <input type="password" id="wifi_pass" name="mqtt_pass" oninput="updateConfigField(this)"><br>
+                        <div>
+                            <label for="mqtt_host">Host</label>
+                            <input type="text" id="mqtt_host" name="mqtt_host" oninput="updateConfigField(this)">
+                        </div>
+                        <div>
+                            <label for="mqtt_port">Port</label>
+                            <input type="number" id="mqtt_port" name="mqtt_port" oninput="updateConfigField(this)">
+                        </div>
+                        <div>
+                            <label for="mqtt_user">Username</label>
+                            <input type="text" id="mqtt_user" name="mqtt_user" oninput="updateConfigField(this)">
+                        </div>
+                        <div>
+                            <label for="mqtt_pass">Password</label>
+                            <input type="password" id="mqtt_pass" name="mqtt_pass" oninput="updateConfigField(this)">
+                        </div>
+                        <div class="form-checkbox-field">
+                            <input type="checkbox" id="mqtt_tls" name="mqtt_tls" oninput="updateConfigField(this)">
+                            <label for="mqtt_tls">Enable TLS</label>
+                        </div>
                     </fieldset>
                 </div>
                 <div class="config-panel-footer">
@@ -340,242 +369,262 @@
                 <p id="notification-content">This is some test</p>
             </div>
         </div>
+    </div>
 
-        <script>
-            const ws_status_update = 1;
-            const ws_status_update_lock = 1;
-            const ws_status_update_unlock = 2;
-            const ws_status_update_open = 3;
-            const ws_status_update_closed = 4;
+    <script>
+        const ws_status_update = 1;
+        const ws_status_update_lock = 1;
+        const ws_status_update_unlock = 2;
+        const ws_status_update_open = 3;
+        const ws_status_update_closed = 4;
 
-            const ws_config_update = 2;
-            const ws_notification = 3;
+        const ws_config_update = 2;
+        const ws_notification = 3;
 
-            var doorOpen = false;
-            var locked = true;
+        var doorOpen = false;
+        var locked = true;
 
-            var config = {
-                device_name: "",
-                wifi_ssid: "",
-                wifi_pass: "",
-                mqtt_host: "",
-                mqtt_user: "",
-                mqtt_pass: "",
-            };
+        var config = {
+            device_name: "",
+            wifi_ssid: "",
+            wifi_pass: "",
+            mqtt_host: "",
+            mqtt_port: 0,
+            mqtt_tls: false,
+            mqtt_user: "",
+            mqtt_pass: "",
+        };
 
-            class WebSocketConnection {
-                ws;
+        class WebSocketConnection {
+            ws;
 
-                constructor() {
-                    this.setup();
+            constructor() {
+                this.setup();
+            }
+
+            setup() {
+                if (window.location.protocol === "file:") {
+                    return;
                 }
 
-                setup() {
-                    if (window.location.protocol === "file:") {
-                        return;
-                    }
+                this.ws = new WebSocket('/ws');
 
-                    this.ws = new WebSocket('/ws');
+                this.ws.addEventListener('open', (e) => {
+                    console.log('websocket opened');
+                    console.log(e);
+                });
 
-                    this.ws.addEventListener('open', (e) => {
-                        console.log('websocket opened');
-                        console.log(e);
-                    });
+                this.ws.addEventListener('error', (e) => {
+                    console.log('websocket error');
+                    console.log(e);
+                });
 
-                    this.ws.addEventListener('error', (e) => {
-                        console.log('websocket error');
-                        console.log(e);
-                    });
+                this.ws.addEventListener('close', (e) => {
+                    console.log('websocket closed');
+                    console.log(e);
+                });
 
-                    this.ws.addEventListener('close', (e) => {
-                        console.log('websocket closed');
-                        console.log(e);
-                    });
-
-                    this.ws.addEventListener('message', (e) => {
-                        console.log('websocket message received');
-                        console.log(e);
-                        e.data.bytes().then(
-                            (data) => {
-                                console.log(data);
-                                if (data.length == 2 && data[0] === ws_status_update) {
-                                    processStateUpdate(data[1]);
-                                }
-                                if (data.length > 1 && data[0] == ws_config_update) {
-                                    processConfigUpdate(data.slice(1));
-                                }
-                                if (data.length > 1 && data[0] == ws_notification) {
-                                    console.log(data);
-                                    processNotification(data.slice(1));
-                                }
+                this.ws.addEventListener('message', (e) => {
+                    console.log('websocket message received');
+                    console.log(e);
+                    e.data.bytes().then(
+                        (data) => {
+                            console.log(data);
+                            if (data.length == 2 && data[0] === ws_status_update) {
+                                processStateUpdate(data[1]);
                             }
-                        );
-                    });
-
-                }
-
-                async send(data) {
-                    if (window.location.protocol === "file:") {
-                        return;
-                    }
-
-                    const sleepNow = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
-
-                    while (this.ws.readyState !== WebSocket.OPEN) {
-                        if (this.ws.readyState > 1) {
-                            this.setup();
+                            if (data.length > 1 && data[0] == ws_config_update) {
+                                processConfigUpdate(data.slice(1));
+                            }
+                            if (data.length > 1 && data[0] == ws_notification) {
+                                console.log(data);
+                                processNotification(data.slice(1));
+                            }
                         }
+                    );
+                });
 
-                        await sleepNow(300);
+            }
+
+            async send(data) {
+                if (window.location.protocol === "file:") {
+                    return;
+                }
+
+                const sleepNow = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
+
+                while (this.ws.readyState !== WebSocket.OPEN) {
+                    if (this.ws.readyState > 1) {
+                        this.setup();
                     }
 
-                    this.ws.send(data);
+                    await sleepNow(300);
                 }
+
+                this.ws.send(data);
+            }
+        }
+
+        var ws = new WebSocketConnection();
+
+        function updateConfigField(field) {
+            if (field.type === "checkbox") {
+                config[field.name] = field.checked;
+                return;
             }
 
-            var ws = new WebSocketConnection();
-
-            function updateConfigField(field) {
-                config[field.name] = field.value;
+            if (field.type === "number") {
+                config[field.name] = +field.value;  // convert to int
+                return;
             }
 
-            function updateConfig(updates) {
-                for (var prop in updates) {
-                    if (Object.prototype.hasOwnProperty.call(updates, prop)) {
-                        if (Object.prototype.hasOwnProperty.call(config, prop)) {
-                            console.log(`updating config.${prop} to ${updates[prop]}`);
-                            config[prop] = updates[prop];
-                            document.getElementById(prop).value = config[prop];
+            config[field.name] = field.value;
+        }
+
+        function updateConfig(updates) {
+            for (var prop in updates) {
+                if (Object.prototype.hasOwnProperty.call(updates, prop)) {
+                    if (Object.prototype.hasOwnProperty.call(config, prop)) {
+                        console.log(`updating config.${prop} to ${updates[prop]}`);
+                        config[prop] = updates[prop];
+
+                        var elem = document.getElementById(prop);
+
+                        if (elem.type === "checkbox") {
+                            elem.checked = config[prop];
+                        } else {
+                            elem.value = config[prop];
                         }
                     }
                 }
-
-                console.log("config updated:");
-                console.log(config);
             }
 
-            function saveConfig() {
-                console.log(config);
-                const encoder = new TextEncoder();
-                const data = encoder.encode(JSON.stringify(config));
+            console.log("config updated:");
+            console.log(config);
+        }
 
-                var payload = new Uint8Array(data.length + 1);
-                payload[0] = ws_config_update;
-                payload.set(data, 1);
+        function saveConfig() {
+            console.log(config);
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify(config));
 
-                ws.send(payload);
+            var payload = new Uint8Array(data.length + 1);
+            payload[0] = ws_config_update;
+            payload.set(data, 1);
+
+            ws.send(payload);
+        }
+
+        function openDoor() {
+            const doorOpenImg = document.getElementById("door-open");
+            const doorClosedImg = document.getElementById("door-closed");
+            doorClosedImg.classList.add("hide");
+            doorOpenImg.classList.remove("hide");
+        }
+
+        function closeDoor() {
+            const doorOpenImg = document.getElementById("door-open");
+            const doorClosedImg = document.getElementById("door-closed");
+            doorOpenImg.classList.add("hide");
+            doorClosedImg.classList.remove("hide");
+        }
+
+        function toggleDoor() {
+            if (doorOpen) {
+                closeDoor();
+                doorOpen = false;
+            } else {
+                openDoor();
+                doorOpen = true;
             }
+        }
 
-            function openDoor() {
-                const doorOpenImg = document.getElementById("door-open");
-                const doorClosedImg = document.getElementById("door-closed");
-                doorClosedImg.classList.add("hide");
-                doorOpenImg.classList.remove("hide");
-            }
-
-            function closeDoor() {
-                const doorOpenImg = document.getElementById("door-open");
-                const doorClosedImg = document.getElementById("door-closed");
-                doorOpenImg.classList.add("hide");
-                doorClosedImg.classList.remove("hide");
-            }
-
-            function toggleDoor() {
-                if (doorOpen) {
-                    closeDoor();
-                    doorOpen = false;
-                } else {
-                    openDoor();
-                    doorOpen = true;
-                }
-            }
-
-            function openLock() {
-                const lockElem = document.getElementById("lock");
-                const lockOpenImg = document.getElementById("lock-unlocked");
-                const lockClosedImg = document.getElementById("lock-locked");
-                lock.classList.replace("locked", "unlocked");
-                lockClosedImg.classList.add("hide");
-                lockOpenImg.classList.remove("hide");
-            }
-
-            function closeLock() {
-                const lockElem = document.getElementById("lock");
-                const lockOpenImg = document.getElementById("lock-unlocked");
-                const lockClosedImg = document.getElementById("lock-locked");
-                lock.classList.replace("unlocked", "locked");
-                lockOpenImg.classList.add("hide");
-                lockClosedImg.classList.remove("hide");
-            }
-
-            function toggleLock() {
-                var lockstate = new Uint8Array(2);
-                lockstate[0] = ws_status_update;
-
-                if (locked) {
-                    openLock();
-                    locked = false;
-                    lockstate[1] = ws_status_update_unlock;
-                } else {
-                    closeLock();
-                    locked = true;
-                    lockstate[1] = ws_status_update_lock;
-                }
-
-                ws.send(lockstate);
-            }
-
-            function processStateUpdate(state) {
-                switch (state) {
-                    case ws_status_update_lock:
-                        closeLock();
-                        break;
-                    case ws_status_update_unlock:
-                        openLock();
-                        break;
-                    case ws_status_update_open:
-                        openDoor();
-                        break;
-                    case ws_status_update_closed:
-                        closeDoor();
-                        break;
-                }
-            }
-
-            function processConfigUpdate(data) {
-                const decoder = new TextDecoder();
-                const jsonStr = decoder.decode(data);
-                console.log(jsonStr);
-                const updates = JSON.parse(jsonStr);
-                updateConfig(updates);
-            }
-
-            function processNotification(data) {
-                const decoder = new TextDecoder();
-                const notification = decoder.decode(data);
-                console.log(notification);
-
-                var popup = document.getElementById("notification");
-                var content = document.getElementById("notification-content");
-                content.textContent = notification;
-                popup.classList.remove("notification-closed");
-
-                setTimeout(() => {
-                    popup.classList.add("notification-closed");
-                }, "3000");
-            }
-
-            function toggleConfig() {
-                const panel = document.getElementById("config-panel");
-                const form = document.getElementById("config-panel-form");
-
-                panel.classList.toggle("closed");
-                form.classList.toggle("closed");
-            }
-
+        function openLock() {
             const lockElem = document.getElementById("lock");
-            lockElem.addEventListener("click", toggleLock);
-        </script>
+            const lockOpenImg = document.getElementById("lock-unlocked");
+            const lockClosedImg = document.getElementById("lock-locked");
+            lock.classList.replace("locked", "unlocked");
+            lockClosedImg.classList.add("hide");
+            lockOpenImg.classList.remove("hide");
+        }
+
+        function closeLock() {
+            const lockElem = document.getElementById("lock");
+            const lockOpenImg = document.getElementById("lock-unlocked");
+            const lockClosedImg = document.getElementById("lock-locked");
+            lock.classList.replace("unlocked", "locked");
+            lockOpenImg.classList.add("hide");
+            lockClosedImg.classList.remove("hide");
+        }
+
+        function toggleLock() {
+            var lockstate = new Uint8Array(2);
+            lockstate[0] = ws_status_update;
+
+            if (locked) {
+                openLock();
+                locked = false;
+                lockstate[1] = ws_status_update_unlock;
+            } else {
+                closeLock();
+                locked = true;
+                lockstate[1] = ws_status_update_lock;
+            }
+
+            ws.send(lockstate);
+        }
+
+        function processStateUpdate(state) {
+            switch (state) {
+                case ws_status_update_lock:
+                    closeLock();
+                    break;
+                case ws_status_update_unlock:
+                    openLock();
+                    break;
+                case ws_status_update_open:
+                    openDoor();
+                    break;
+                case ws_status_update_closed:
+                    closeDoor();
+                    break;
+            }
+        }
+
+        function processConfigUpdate(data) {
+            const decoder = new TextDecoder();
+            const jsonStr = decoder.decode(data);
+            console.log(jsonStr);
+            const updates = JSON.parse(jsonStr);
+            updateConfig(updates);
+        }
+
+        function processNotification(data) {
+            const decoder = new TextDecoder();
+            const notification = decoder.decode(data);
+            console.log(notification);
+
+            var popup = document.getElementById("notification");
+            var content = document.getElementById("notification-content");
+            content.textContent = notification;
+            popup.classList.remove("notification-closed");
+
+            setTimeout(() => {
+                popup.classList.add("notification-closed");
+            }, "3000");
+        }
+
+        function toggleConfig() {
+            const panel = document.getElementById("config-panel");
+            const form = document.getElementById("config-panel-form");
+
+            panel.classList.toggle("closed");
+            form.classList.toggle("closed");
+        }
+
+        const lockElem = document.getElementById("lock");
+        lockElem.addEventListener("click", toggleLock);
+    </script>
 </body>
 
 </html>
